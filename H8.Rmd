@@ -1,0 +1,1068 @@
+---
+title: "Hypothesis 8: Individual Variability in Voice Sensitivity"
+subtitle: "Are Passive–Active CM Differences Uniform Across Participants, or Does Who You Are Matter?"
+author: "Team: Metamatics"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    latex_engine: xelatex
+    number_sections: true
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    fig_caption: true
+    highlight: tango
+    df_print: paged
+fontsize: 11pt
+geometry: margin=1in
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height= 5,
+  out.width = "100%",
+  dpi       = 150
+)
+
+# ── Package installation and loading ──────────────────────────────────────────
+pkgs <- c("dplyr", "tidyr", "tibble", "ggplot2", "readr", "stringr",
+          "purrr", "knitr", "kableExtra", "scales", "patchwork",
+          "lme4", "ggridges", "diptest")
+for (p in pkgs) {
+  if (!requireNamespace(p, quietly = TRUE))
+    install.packages(p, repos = "https://cran.r-project.org")
+  library(p, character.only = TRUE)
+}
+
+# ── Colour palettes (consistent with H7) ─────────────────────────────────────
+PAL_VOICE  <- c("Active" = "#2E86AB", "Passive" = "#A23B72")
+PAL_DELTA  <- c("Negative\n(Active better)" = "#E76F51",
+                "Positive\n(Passive better)" = "#2A9D8F",
+                "Near zero"                  = "#B0BEC5")
+HDR_COLOR  <- "#1B3A57"
+ACCENT_1   <- "#F4A261"
+ACCENT_2   <- "#264653"
+
+# ── Global ggplot theme ───────────────────────────────────────────────────────
+theme_h8 <- theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14, colour = "#2C2C2C"),
+    plot.subtitle    = element_text(colour = "grey40", size = 10.5, lineheight = 1.3),
+    plot.caption     = element_text(colour = "grey55", size = 9, hjust = 0),
+    legend.position  = "bottom",
+    legend.title     = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(colour = "grey92"),
+    axis.title       = element_text(face = "bold", size = 11),
+    strip.text       = element_text(face = "bold", size = 11)
+  )
+theme_set(theme_h8)
+
+output_dir <- "R_output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+```
+
+---
+
+# What is Hypothesis 8?
+
+## The Big Idea
+
+Previous analyses (H3, H7) treated participants as interchangeable — every person was
+assumed to respond to the Active/Passive voice manipulation in the same way.
+
+**Hypothesis 8 challenges that assumption.**
+
+> Some people might be highly sensitive to grammatical voice — their memory suffers
+> significantly when a sentence is in Passive form.  
+> Others might be completely unaffected — Active and Passive sentences are equally
+> memorable to them.  
+> A third group might even *benefit* from Passive voice.
+
+If this spread of individual responses is large and systematic, then **who the participant
+is** explains a substantial portion of memory performance — beyond what condition-level
+factors (voice, lexical type) can explain alone.
+
+## The Scientific Question
+
+> **H8:** Is there significant, systematic individual variability in voice sensitivity
+> (i.e., the Passive − Active Corrected Memorability difference)?  
+> And how much of the total variance in CM scores is explained by *person* identity
+> versus *experimental conditions*?
+
+---
+
+# Formal Hypothesis
+
+## Simple English
+
+> **Null (H0):** Everyone responds to passive voice in the same way.
+> The Passive − Active CM difference is essentially zero (or random noise) for all
+> participants.
+
+> **Alternative (H8):** Participants differ *systematically* in how sensitive they are
+> to grammatical voice. Some show large performance drops in Passive; others show
+> gains; still others show no effect. This consistent individual pattern is not just
+> random — it explains a meaningful chunk of total score variance.
+
+## Why This Matters
+
+| Implication | Explanation |
+|---|---|
+| **Educational** | If voice sensitivity is person-specific, some students may need targeted grammar support |
+| **Psycholinguistic** | Suggests working memory or syntactic processing capacity varies meaningfully across individuals |
+| **Statistical** | Ignoring individual variability inflates false positives in group-level tests (pseudo-replication) |
+| **Applied** | Sentence complexity guidelines should account for reader heterogeneity, not just averages |
+
+---
+
+# Step A: Data Loading & Preparation
+
+```{r load-data}
+h8_path <- file.path(output_dir, "H3H4_step3_analysis.csv")
+if (!file.exists(h8_path)) {
+  stop("H3H4_step3_analysis.csv not found. Please knit Hypo3and4_analysis.Rmd first.")
+}
+
+df_raw <- read_csv(h8_path, show_col_types = FALSE)
+
+cat("=== Dataset loaded ===\n")
+cat(sprintf("  Rows              : %s\n", format(nrow(df_raw), big.mark = ",")))
+cat(sprintf("  Unique participants: %d\n", n_distinct(df_raw$participant_ID)))
+cat(sprintf("  Columns           : %s\n\n", paste(names(df_raw), collapse = ", ")))
+
+# ── Standardise Voice label ────────────────────────────────────────────────────
+df <- df_raw %>%
+  mutate(
+    Voice = case_when(
+      toupper(trimws(Original_Voice)) == "A" ~ "Active",
+      toupper(trimws(Original_Voice)) == "P" ~ "Passive",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Voice), !is.na(corrected_memorability)) %>%
+  mutate(Voice = factor(Voice, levels = c("Active", "Passive"))) %>%
+  droplevels()
+
+cat(sprintf("Rows after cleaning : %s\n", format(nrow(df), big.mark = ",")))
+cat(sprintf("Voice levels        : %s\n", paste(levels(df$Voice), collapse = ", ")))
+```
+
+## A1 — Compute Per-Participant Voice Sensitivity (Delta)
+
+The **Voice Sensitivity Delta** is:
+
+> **Δ = Mean Passive CM − Mean Active CM** (per participant)
+
+- **Δ > 0** → Passive voice *helps* this person  
+- **Δ < 0** → Passive voice *hurts* this person  
+- **Δ ≈ 0** → No voice effect for this person  
+
+```{r compute-delta}
+# Per-participant, per-voice MEAN corrected memorability
+df_person_voice <- df %>%
+  group_by(participant_ID, Voice) %>%
+  summarise(
+    CM_mean = mean(corrected_memorability, na.rm = TRUE),
+    CM_sd   = sd(corrected_memorability,   na.rm = TRUE),
+    n_trials= n(),
+    .groups = "drop"
+  )
+
+# Pivot to wide: one row per participant
+df_wide <- df_person_voice %>%
+  pivot_wider(
+    id_cols     = participant_ID,
+    names_from  = Voice,
+    values_from = CM_mean,
+    names_prefix= "CM_"
+  )
+
+# Compute Delta
+df_delta <- df_wide %>%
+  mutate(
+    Delta = CM_Passive - CM_Active,
+    Direction = case_when(
+      Delta >  0.05  ~ "Positive\n(Passive better)",
+      Delta < -0.05  ~ "Negative\n(Active better)",
+      TRUE           ~ "Near zero"
+    ),
+    Direction = factor(Direction,
+                       levels = c("Positive\n(Passive better)",
+                                  "Near zero",
+                                  "Negative\n(Active better)"))
+  ) %>%
+  filter(!is.na(Delta))
+
+cat(sprintf("Participants with full Active+Passive data: %d\n", nrow(df_delta)))
+cat(sprintf("\nDelta (Passive - Active) summary:\n"))
+print(summary(df_delta$Delta))
+cat(sprintf("\n  SD of Delta  : %.4f\n", sd(df_delta$Delta,   na.rm = TRUE)))
+cat(sprintf("  Range        : [%.4f, %.4f]\n", min(df_delta$Delta), max(df_delta$Delta)))
+cat(sprintf("\nDirection counts:\n"))
+print(table(df_delta$Direction))
+```
+
+---
+
+# Step B: Descriptive Statistics
+
+```{r descriptives}
+# Overall by voice
+desc_voice <- df_person_voice %>%
+  group_by(Voice) %>%
+  summarise(
+    N          = n(),
+    Mean_CM    = round(mean(CM_mean, na.rm = TRUE), 4),
+    Median_CM  = round(median(CM_mean, na.rm = TRUE), 4),
+    SD_CM      = round(sd(CM_mean, na.rm = TRUE), 4),
+    SE_CM      = round(sd(CM_mean, na.rm = TRUE) / sqrt(n()), 4),
+    Min_CM     = round(min(CM_mean, na.rm = TRUE), 4),
+    Max_CM     = round(max(CM_mean, na.rm = TRUE), 4),
+    .groups    = "drop"
+  )
+
+desc_voice %>%
+  kable(
+    caption   = "Table H8-1. Descriptive Statistics of CM by Voice (participant-level means)",
+    col.names = c("Voice","N","Mean CM","Median CM","SD","SE","Min","Max"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped","HOLD_position"),
+    bootstrap_options = c("striped","hover"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+
+# Delta descriptives
+cat(sprintf("\n=== Voice Sensitivity Delta (Passive - Active) ===\n"))
+cat(sprintf("  N participants : %d\n",   nrow(df_delta)))
+cat(sprintf("  Mean Delta     : %.4f\n", mean(df_delta$Delta, na.rm = TRUE)))
+cat(sprintf("  SD of Delta    : %.4f\n", sd(df_delta$Delta,   na.rm = TRUE)))
+cat(sprintf("  %% with Delta > 0: %.1f%%\n",
+            100 * mean(df_delta$Delta > 0, na.rm = TRUE)))
+cat(sprintf("  %% with Delta < 0: %.1f%%\n",
+            100 * mean(df_delta$Delta < 0, na.rm = TRUE)))
+```
+
+---
+
+# Step C: Visualisations
+
+## Figure 1 — Violin + Box Plot: CM by Voice
+
+> **How to read this:** The violin shape shows the full distribution of scores for
+> each voice condition. The inner boxplot shows median and quartiles. Individual dots
+> show each participant's average CM. If the two violins look very similar, voice
+> has little overall effect. Large differences in shape or centre = a voice effect.
+
+```{r fig1-violin-box, fig.cap="Figure H8-1. Violin-Boxplot of per-participant mean CM by Voice. Dots = individual participants.", fig.width=8, fig.height=5.5}
+p1 <- ggplot(df_person_voice,
+             aes(x = Voice, y = CM_mean, fill = Voice, colour = Voice)) +
+  # Violin layer
+  geom_violin(alpha = 0.35, width = 0.8, trim = FALSE, linewidth = 0.8) +
+  # Boxplot inset
+  geom_boxplot(width = 0.18, alpha = 0.85, outlier.shape = NA,
+               colour = "grey20", fill = "white", linewidth = 0.7) +
+  # Individual points (jittered)
+  geom_jitter(width = 0.09, alpha = 0.45, size = 2.2,
+              aes(colour = Voice), show.legend = FALSE) +
+  # Mean marker
+  stat_summary(fun = mean, geom = "point", shape = 23,
+               size = 4.5, fill = "white", colour = "black", stroke = 1.2) +
+  scale_fill_manual(values   = PAL_VOICE, guide = "none") +
+  scale_colour_manual(values = PAL_VOICE, guide = "none") +
+  scale_y_continuous(labels = number_format(accuracy = 0.01)) +
+  labs(
+    title    = "Figure H8-1: Corrected Memorability by Voice",
+    subtitle = "Violin = full distribution  |  Box = median & IQR  |  Diamond = group mean  |  Dots = participants",
+    x        = "Grammatical Voice",
+    y        = "Mean Corrected Memorability\n(Hit Rate − False Alarm Rate)",
+    caption  = "Each dot is one participant's average CM across all trials of that voice type."
+  ) +
+  annotate("text",
+           x     = c("Active", "Passive"),
+           y     = rep(min(df_person_voice$CM_mean, na.rm=TRUE) - 0.04, 2),
+           label = paste0("n = ", desc_voice$N,
+                          "\nM = ", round(desc_voice$Mean_CM, 3)),
+           size  = 3.5, colour = "grey30", fontface = "italic")
+
+print(p1)
+ggsave(file.path(output_dir, "H8_violin_box_voice.png"), p1,
+       width = 8, height = 5.5, dpi = 150)
+```
+
+## Figure 2 — Distribution of Voice Sensitivity Delta (Δ = Passive − Active)
+
+> **This is the KEY plot for H8.**  
+> We look at each person's individual Passive − Active difference score.  
+> A **unimodal distribution centred near zero** means most people are equally
+> unaffected — no real variability.  
+> A **wide, spread-out, or multimodal distribution** means people genuinely differ
+> in how sensitive they are to voice — H8 is supported.
+
+```{r fig2-delta-density, fig.cap="Figure H8-2. Distribution of per-participant Voice Sensitivity Delta (Passive CM - Active CM). A wide or multimodal distribution indicates genuine individual differences.", fig.width=9, fig.height=5.5}
+# Rug + density + histogram combo
+p2 <- ggplot(df_delta, aes(x = Delta)) +
+  # Histogram bars
+  geom_histogram(aes(y = after_stat(density), fill = after_stat(x)),
+                 bins = max(10, round(sqrt(nrow(df_delta)) * 1.8)),
+                 colour = "white", linewidth = 0.3, alpha = 0.75) +
+  scale_fill_gradient2(low = "#2E86AB", mid = "#F5F5F5", high = "#A23B72",
+                       midpoint = 0, guide = "none") +
+  # Smooth density overlay
+  geom_density(colour = "#264653", linewidth = 1.3, fill = "#26465315",
+               alpha = 0.6) +
+  # Zero reference line
+  geom_vline(xintercept = 0, linetype = "dashed",
+             colour = "grey30", linewidth = 1) +
+  # Mean line
+  geom_vline(xintercept = mean(df_delta$Delta, na.rm = TRUE),
+             linetype = "solid", colour = "#E76F51", linewidth = 1.2) +
+  # Rug on bottom
+  geom_rug(aes(colour = Direction), alpha = 0.7, linewidth = 0.6) +
+  scale_colour_manual(values = c(
+    "Positive\n(Passive better)" = "#2A9D8F",
+    "Near zero"                  = "#B0BEC5",
+    "Negative\n(Active better)"  = "#E76F51"
+  ), name = "Direction") +
+  annotate("text",
+           x     = mean(df_delta$Delta, na.rm = TRUE),
+           y     = Inf, vjust = 1.8, hjust = -0.15,
+           label = paste0("Mean = ", round(mean(df_delta$Delta, na.rm=TRUE), 3),
+                          "\nSD = ", round(sd(df_delta$Delta, na.rm=TRUE), 3)),
+           colour = "#E76F51", size = 3.8, fontface = "bold") +
+  annotate("text", x = 0, y = Inf, vjust = 1.8, hjust = 1.1,
+           label = "No effect\n(Delta = 0)",
+           colour = "grey40", size = 3.5, fontface = "italic") +
+  labs(
+    title    = "Figure H8-2: Distribution of Individual Voice Sensitivity (Delta = Passive - Active CM)",
+    subtitle = "Each bar/point = one participant | Red line = sample mean | Dashed line = zero-effect reference",
+    x        = "Voice Sensitivity Delta  (Positive = Passive helps; Negative = Passive hurts)",
+    y        = "Density",
+    caption  = "Wide or multi-peaked distributions indicate genuine individual differences in voice sensitivity."
+  )
+
+print(p2)
+ggsave(file.path(output_dir, "H8_delta_distribution.png"), p2,
+       width = 9, height = 5.5, dpi = 150)
+```
+
+## Figure 3 — Dot Plot of Individual Deltas (Ranked)
+
+> Every participant appears as one dot on this plot, sorted from the most
+> "Active-preferring" person (left) to the most "Passive-preferring" person (right).
+> A flat plateau around zero = no variability. A wide spread = lots of individual differences.
+
+```{r fig3-lollipop, fig.cap="Figure H8-3. Ranked per-participant Voice Sensitivity Deltas. Each point = one participant, sorted by magnitude. Colour encodes direction.", fig.width=10, fig.height=5}
+df_delta_ranked <- df_delta %>%
+  arrange(Delta) %>%
+  mutate(rank_idx = row_number())
+
+p3 <- ggplot(df_delta_ranked,
+             aes(x = rank_idx, y = Delta, colour = Direction)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50",
+             linewidth = 0.8) +
+  geom_segment(aes(xend = rank_idx, yend = 0), alpha = 0.5, linewidth = 0.5) +
+  geom_point(size = 3, alpha = 0.85) +
+  scale_colour_manual(values = c(
+    "Positive\n(Passive better)" = "#2A9D8F",
+    "Near zero"                  = "#9E9E9E",
+    "Negative\n(Active better)"  = "#E76F51"
+  ), name = "Voice Effect Direction") +
+  scale_y_continuous(breaks = pretty_breaks(n = 8)) +
+  labs(
+    title    = "Figure H8-3: Ranked Individual Voice Sensitivity Deltas",
+    subtitle = "Sorted from most Active-preferring (left) to most Passive-preferring (right)",
+    x        = "Participant rank (sorted by Delta)",
+    y        = "Delta = Passive CM - Active CM",
+    caption  = paste0("N = ", nrow(df_delta_ranked), " participants. ",
+                      "Dashed line = zero effect reference.")
+  )
+
+print(p3)
+ggsave(file.path(output_dir, "H8_ranked_deltas.png"), p3,
+       width = 10, height = 5, dpi = 150)
+```
+
+## Figure 4 — Spaghetti Plot: Individual Participant Profiles
+
+> Each line is one participant. The left point is their Active CM, the right point
+> is their Passive CM. **Parallel lines** going in the same direction = consistent
+> group effect. **Lines crossing or going in different directions** = large individual
+> variability — some people helped by Passive, others hurt by it.
+
+```{r fig4-spaghetti, fig.cap="Figure H8-4. Individual participant CM profiles: Active vs Passive. Each line = one participant. Crossing lines indicate heterogeneous voice effects.", fig.width=9, fig.height=6}
+df_spaghetti <- df_wide %>%
+  filter(!is.na(CM_Active), !is.na(CM_Passive)) %>%
+  mutate(
+    Delta     = CM_Passive - CM_Active,
+    line_col  = case_when(
+      Delta >  0.05 ~ "Passive better",
+      Delta < -0.05 ~ "Active better",
+      TRUE          ~ "Near zero"
+    )
+  )
+
+p4 <- ggplot(df_spaghetti) +
+  # Individual lines — coloured by direction
+  geom_segment(aes(x = 1, xend = 2,
+                   y = CM_Active, yend = CM_Passive,
+                   colour = line_col, group = participant_ID),
+               alpha = 0.45, linewidth = 0.65) +
+  # Group mean line on top
+  geom_segment(
+    data = tibble(
+      y_act = mean(df_spaghetti$CM_Active,  na.rm = TRUE),
+      y_pas = mean(df_spaghetti$CM_Passive, na.rm = TRUE)
+    ),
+    aes(x = 1, xend = 2, y = y_act, yend = y_pas),
+    colour = "#2C2C2C", linewidth = 2.5, alpha = 0.85,
+    lineend = "round"
+  ) +
+  geom_point(aes(x = 1, y = CM_Active,  colour = line_col), alpha = 0.55, size = 2) +
+  geom_point(aes(x = 2, y = CM_Passive, colour = line_col), alpha = 0.55, size = 2) +
+  # Bold mean points
+  geom_point(data = desc_voice,
+             aes(x = c(1,2), y = Mean_CM),
+             size = 5, shape = 23, fill = "white", colour = "black", stroke = 1.5) +
+  scale_colour_manual(
+    values = c("Passive better" = "#2A9D8F",
+               "Near zero"      = "#CFD8DC",
+               "Active better"  = "#E76F51"),
+    name   = "Voice Effect"
+  ) +
+  scale_x_continuous(
+    breaks = c(1, 2),
+    labels = c("Active", "Passive"),
+    limits = c(0.7, 2.3)
+  ) +
+  labs(
+    title    = "Figure H8-4: Individual Participant CM Profiles (Active vs Passive)",
+    subtitle = "Each line = one participant  |  Bold diamond = group mean  |  Colour = direction of change",
+    x        = "Voice Condition",
+    y        = "Corrected Memorability\n(Hit Rate - False Alarm Rate)",
+    caption  = "Lines crossing or diverging indicate individual-level heterogeneity in voice sensitivity."
+  )
+
+print(p4)
+ggsave(file.path(output_dir, "H8_spaghetti.png"), p4,
+       width = 9, height = 6, dpi = 150)
+```
+
+## Figure 5 — Ridge Plot: CM Distributions by Direction Group
+
+> Participants are split into three groups based on their Delta category:  
+> those for whom Passive helps, those for whom it has no effect, and those for whom
+> it hurts. The ridge plots show the CM distribution (Active and Passive together)
+> for each group.
+
+```{r fig5-ridge, fig.cap="Figure H8-5. Ridge density plots of CM by voice, separated into Delta direction groups.", fig.width=9, fig.height=5.5}
+# Join direction info back onto the trial-level person-voice data
+df_ridge <- df_person_voice %>%
+  left_join(df_delta %>% select(participant_ID, Direction), by = "participant_ID") %>%
+  filter(!is.na(Direction))
+
+p5 <- ggplot(df_ridge, aes(y = Direction, x = CM_mean, fill = Voice)) +
+  geom_density_ridges(
+    aes(fill = Voice),
+    alpha      = 0.55,
+    scale      = 1.1,
+    rel_min_height = 0.01,
+    colour     = "white",
+    linewidth  = 0.5
+  ) +
+  scale_fill_manual(values = PAL_VOICE, name = "Voice") +
+  scale_x_continuous(labels = number_format(accuracy = 0.01)) +
+  labs(
+    title    = "Figure H8-5: CM Distributions by Voice Sensitivity Direction",
+    subtitle = "Three groups: Passive-better, Near-zero, Active-better participants",
+    x        = "Mean Corrected Memorability",
+    y        = "",
+    caption  = "Wider separation between Active/Passive curves within a group = stronger voice effect for that group."
+  )
+
+print(p5)
+ggsave(file.path(output_dir, "H8_ridge_direction.png"), p5,
+       width = 9, height = 5.5, dpi = 150)
+```
+
+## Figure 6 — Boxplot: CM by Voice × Direction Group
+
+> A standard comparison across the three direction groups, separately for Active and
+> Passive. This confirms whether the "direction" classification is real — if it is,
+> we should see Active and Passive clearly diverge for the Positive and Negative groups,
+> but converge for the Near-zero group.
+
+```{r fig6-grouped-box, fig.cap="Figure H8-6. Boxplot of CM by Voice, faceted by direction group. Confirms the classification is meaningful.", fig.width=10, fig.height=5}
+p6 <- ggplot(df_ridge,
+             aes(x = Voice, y = CM_mean, fill = Voice)) +
+  geom_violin(alpha = 0.25, width = 0.9, trim = FALSE) +
+  geom_boxplot(width = 0.22, alpha = 0.85, outlier.shape = NA,
+               colour = "grey25") +
+  geom_jitter(aes(colour = Voice), width = 0.07,
+              alpha = 0.4, size = 1.8, show.legend = FALSE) +
+  stat_summary(fun = mean, geom = "point", shape = 21, size = 3.5,
+               fill = "white", colour = "black") +
+  scale_fill_manual(values   = PAL_VOICE, guide = "none") +
+  scale_colour_manual(values = PAL_VOICE, guide = "none") +
+  facet_wrap(~ Direction, nrow = 1) +
+  labs(
+    title    = "Figure H8-6: CM by Voice, Faceted by Voice Sensitivity Direction",
+    subtitle = "Diamond = group mean  |  Box = median & IQR  |  Dots = individuals",
+    x        = "Voice",
+    y        = "Mean Corrected Memorability",
+    caption  = "Groups: Passive-better (Delta > 0.05), Near-zero (-0.05 to 0.05), Active-better (Delta < -0.05)."
+  )
+
+print(p6)
+ggsave(file.path(output_dir, "H8_grouped_boxplot.png"), p6,
+       width = 10, height = 5, dpi = 150)
+```
+
+## Figure 7 — Delta Distribution: Histogram with Direction Colouring
+
+> A coloured histogram where each bar is filled with the predominant direction in
+> that range. Makes it very easy to see how many participants fall in each category
+> and where the bulk of the distribution sits.
+
+```{r fig7-colored-hist, fig.cap="Figure H8-7. Colour-coded histogram of Delta scores highlighting the three direction groups.", fig.width=9, fig.height=5}
+p7 <- ggplot(df_delta, aes(x = Delta, fill = Direction)) +
+  geom_histogram(bins  = max(8, round(sqrt(nrow(df_delta)) * 1.8)),
+                 colour = "white", linewidth = 0.3, alpha = 0.88) +
+  geom_vline(xintercept = 0,  linetype = "dashed", colour = "grey30", linewidth = 0.9) +
+  geom_vline(xintercept = c(-0.05, 0.05),
+             linetype = "dotted", colour = "grey50", linewidth = 0.7) +
+  scale_fill_manual(values = c(
+    "Positive\n(Passive better)" = "#2A9D8F",
+    "Near zero"                  = "#B0BEC5",
+    "Negative\n(Active better)"  = "#E76F51"
+  ), name = "Direction") +
+  labs(
+    title    = "Figure H8-7: Colour-Coded Distribution of Voice Sensitivity Deltas",
+    subtitle = "Vertical dotted lines at Delta = ±0.05 define direction categories",
+    x        = "Delta = Passive - Active CM",
+    y        = "Count of Participants",
+    caption  = paste0("N participants = ", nrow(df_delta),
+                      " | Blue = teal segment Passive-better | Grey = Near-zero | Orange = Active-better")
+  )
+
+print(p7)
+ggsave(file.path(output_dir, "H8_colored_histogram.png"), p7,
+       width = 9, height = 5, dpi = 150)
+```
+
+---
+
+# Step D: Multimodality Testing
+
+> **Simple explanation:** If everyone responded similarly to voice, we would expect
+> the Delta histogram to be shaped like a single bell curve (unimodal).  
+> A **multimodal** distribution (two or more humps) would be strong evidence that
+> there are *distinct subgroups* of participants — e.g., "voice-sensitive" and
+> "voice-insensitive" people.  
+> We use the **Hartigan's Dip Test** to formally check if the distribution is
+> significantly non-unimodal.
+
+```{r multimodality-test}
+cat("=== Hartigan Dip Test for Unimodality ===\n")
+cat("H0: The distribution is unimodal\n")
+cat("H1: The distribution is multimodal (has more than one peak)\n\n")
+
+dip_result <- dip.test(df_delta$Delta)
+cat(sprintf("  Dip statistic : %.6f\n",  dip_result$statistic))
+cat(sprintf("  p-value       : %.4f\n",  dip_result$p.value))
+cat(sprintf("  N             : %d\n\n",   dip_result$n))
+
+if (dip_result$p.value < 0.05) {
+  cat("=> MULTIMODAL: The Delta distribution has significantly more than one peak.\n")
+  cat("   This is strong evidence for distinct subgroups of voice sensitivity.\n")
+} else {
+  cat("=> UNIMODAL: No significant evidence of multimodality.\n")
+  cat("   The distribution IS consistent with a single population,\n")
+  cat("   but may still show substantial spread (high SD = variability exists).\n")
+}
+
+# Table
+tibble(
+  Statistic = c("Dip statistic", "p-value", "N", "Conclusion"),
+  Value     = c(
+    round(dip_result$statistic, 6),
+    round(dip_result$p.value,   4),
+    dip_result$n,
+    ifelse(dip_result$p.value < 0.05,
+           "Multimodal (p < 0.05)",
+           "Unimodal — no evidence of distinct subgroups (p >= 0.05)")
+  )
+) %>%
+  kable(caption = "Table H8-2. Hartigan Dip Test for Unimodality of Delta Distribution",
+        booktabs = TRUE) %>%
+  kable_styling(
+    latex_options     = c("striped","HOLD_position"),
+    bootstrap_options = c("striped","hover"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+---
+
+# Step E: Variance Decomposition — ICC via Null Mixed Model
+
+> **Simple explanation — What is the ICC?**  
+>
+> ICC stands for **Intraclass Correlation Coefficient**. It tells us what *fraction*
+> of the total variability in CM scores comes from differences *between participants*
+> (i.e., who the person is), as opposed to differences *between conditions*
+> (voice type, lexical condition) or just random trial noise.
+>
+> - **ICC = 0.00** → No participant-level clustering. Everyone is equally variable.
+>   Individual identity explains nothing.
+> - **ICC = 1.00** → All variability is between participants. Everyone is internally
+>   consistent, but very different from each other.
+> - **ICC > 0.10** → A meaningful proportion of variance comes from who the person is.
+> - **ICC > 0.30** → Participant identity is a major driver of scores.
+>
+> We fit a **null mixed model** (intercept only, with participant as a random effect)
+> to extract the variance components.
+
+## E1 — Null Mixed Model (Person only)
+
+```{r mixed-model-null}
+cat("=== Null Mixed Model: CM ~ 1 + (1 | participant_ID) ===\n\n")
+
+if (!requireNamespace("lme4", quietly = TRUE)) {
+  cat("lme4 not available — install it to run mixed models.\n")
+  icc_null  <- NA_real_
+  var_part  <- NA_real_
+  var_resid <- NA_real_
+} else {
+  # Trial-level data for the mixed model (more power than participant means)
+  df_trial <- df %>%
+    select(participant_ID, Voice, corrected_memorability)
+
+  # Null model — no fixed effects, just random intercept per person
+  m0 <- lmer(corrected_memorability ~ 1 + (1 | participant_ID),
+             data   = df_trial,
+             REML   = TRUE,
+             control = lmerControl(optimizer = "bobyqa"))
+
+  vc_null   <- as.data.frame(VarCorr(m0))
+  var_part  <- vc_null$vcov[vc_null$grp == "participant_ID"]
+  var_resid <- vc_null$vcov[vc_null$grp == "Residual"]
+  icc_null  <- var_part / (var_part + var_resid)
+
+  cat("Variance Components (Null Model):\n")
+  print(vc_null[, c("grp","vcov","sdcor")])
+  cat(sprintf("\n  Participant (between) variance : %.6f\n", var_part))
+  cat(sprintf("  Residual   (within)  variance : %.6f\n",  var_resid))
+  cat(sprintf("  ICC (participant-level)       : %.4f  (%.1f%% of total variance)\n\n",
+              icc_null, 100 * icc_null))
+}
+```
+
+## E2 — Condition Mixed Model (Person + Voice)
+
+```{r mixed-model-condition}
+cat("=== Condition Mixed Model: CM ~ Voice + (1 | participant_ID) ===\n\n")
+
+if (!requireNamespace("lme4", quietly = TRUE) || is.na(icc_null)) {
+  cat("Skipped: lme4 not available.\n")
+  icc_cond <- NA_real_
+} else {
+  n_voice_levels <- nlevels(df_trial$Voice)
+
+  if (n_voice_levels < 2) {
+    cat("Only one voice level — condition model cannot be estimated.\n")
+    icc_cond <- NA_real_
+  } else {
+    m1 <- lmer(corrected_memorability ~ Voice + (1 | participant_ID),
+               data    = df_trial,
+               REML    = TRUE,
+               control = lmerControl(optimizer = "bobyqa"))
+
+    vc_cond    <- as.data.frame(VarCorr(m1))
+    var_part_c <- vc_cond$vcov[vc_cond$grp == "participant_ID"]
+    var_res_c  <- vc_cond$vcov[vc_cond$grp == "Residual"]
+    icc_cond   <- var_part_c / (var_part_c + var_res_c)
+
+    cat("Variance Components (Condition Model):\n")
+    print(vc_cond[, c("grp","vcov","sdcor")])
+    cat(sprintf("\n  Participant (between) variance : %.6f\n",  var_part_c))
+    cat(sprintf("  Residual   (within)  variance : %.6f\n",   var_res_c))
+    cat(sprintf("  ICC (participant-level)       : %.4f  (%.1f%% of total variance)\n\n",
+                icc_cond, 100 * icc_cond))
+
+    # Variance explained by Voice fixed effect
+    var_explained_by_voice <- 1 - (var_part_c + var_res_c) / (var_part + var_resid)
+    cat(sprintf("  Variance explained by Voice condition: %.1f%%\n\n",
+                100 * abs(var_explained_by_voice)))
+
+    # Model comparison
+    cat("=== Model Comparison (LRT: does Voice improve fit?) ===\n")
+    lrt <- anova(m0, m1, refit = FALSE)
+    print(lrt)
+  }
+}
+```
+
+## E3 — ICC Summary Table
+
+```{r icc-table}
+icc_tbl <- tibble(
+  Model       = c("Null model (person only)",
+                  "Condition model (person + Voice)"),
+  Formula     = c("CM ~ 1 + (1|Participant)",
+                  "CM ~ Voice + (1|Participant)"),
+  ICC         = round(c(icc_null,
+                        ifelse(exists("icc_cond"), icc_cond, NA_real_)), 4),
+  Pct_Variance= paste0(round(c(icc_null,
+                               ifelse(exists("icc_cond"), icc_cond, NA_real_))
+                             * 100, 1), "%"),
+  Interpretation = c(
+    ifelse(is.na(icc_null), "Could not compute",
+    ifelse(icc_null > 0.30, "LARGE: participant identity is a major driver",
+    ifelse(icc_null > 0.10, "MODERATE: meaningful individual differences",
+                            "SMALL: conditions dominate over person identity"))),
+    ifelse(!exists("icc_cond") || is.na(icc_cond), "Could not compute",
+    ifelse(icc_cond > 0.30, "LARGE: even after accounting for voice",
+    ifelse(icc_cond > 0.10, "MODERATE: residual person effects remain",
+                            "SMALL: voice explains most person-level variance")))
+  )
+)
+
+icc_tbl %>%
+  kable(caption = "Table H8-3. ICC from Null and Condition Mixed Models",
+        col.names = c("Model","Formula","ICC","% of Variance","Interpretation"),
+        booktabs = TRUE, format = "latex") %>%
+  kable_styling(
+    latex_options     = c("striped","HOLD_position","scale_down"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white") %>%
+  column_spec(5, italic = TRUE) %>%
+  column_spec(3, bold   = TRUE)
+```
+
+## Figure 8 — Variance Decomposition Bar Chart
+
+```{r fig8-variance-bar, fig.cap="Figure H8-8. Stacked bar chart showing how total CM variance is partitioned between participants (between-person), voice condition (fixed), and residual (within-person).", fig.width=8, fig.height=4.5}
+if (is.na(icc_null)) {
+  cat("Figure H8-8 skipped: ICC could not be computed.\n")
+} else {
+  # Compute variance fractions
+  total_var  <- var_part + var_resid
+  pct_person <- icc_null * 100
+  pct_resid  <- (1 - icc_null) * 100
+
+  var_df <- tibble(
+    Component = factor(
+      c("Between-person\n(individual differences)",
+        "Within-person\n(conditions + noise)"),
+      levels = c("Between-person\n(individual differences)",
+                 "Within-person\n(conditions + noise)")
+    ),
+    Percent = c(pct_person, pct_resid),
+    Colour  = c("#A23B72", "#2E86AB")
+  )
+
+  p8 <- ggplot(var_df, aes(x = "Null Model", y = Percent, fill = Component)) +
+    geom_col(width = 0.4, alpha = 0.88, colour = "white", linewidth = 0.5) +
+    geom_text(aes(label = paste0(round(Percent, 1), "%")),
+              position = position_stack(vjust = 0.5),
+              colour = "white", fontface = "bold", size = 5.5) +
+    scale_fill_manual(values = c("#A23B72", "#2E86AB"), name = "Variance Source") +
+    scale_y_continuous(labels = percent_format(scale = 1),
+                       limits = c(0, 105)) +
+    coord_flip() +
+    labs(
+      title    = "Figure H8-8: Variance Decomposition of Corrected Memorability",
+      subtitle = sprintf("ICC = %.3f — %.1f%% of total CM variance is between-person",
+                         icc_null, pct_person),
+      x        = NULL,
+      y        = "Percentage of Total Variance",
+      caption  = "Null mixed model: CM ~ 1 + (1|participant_ID). REML estimation."
+    ) +
+    theme(
+      axis.text.y     = element_blank(),
+      axis.ticks.y    = element_blank(),
+      legend.position = "right"
+    )
+
+  print(p8)
+  ggsave(file.path(output_dir, "H8_variance_decomposition.png"), p8,
+         width = 8, height = 4.5, dpi = 150)
+}
+```
+
+## Figure 9 — Caterpillar Plot: Random Intercepts per Participant
+
+> Each point is a participant's estimated random intercept from the null mixed model,
+> with 95% confidence intervals (from the conditional modes).  
+> A wide spread across participants = large between-person variance = high ICC.  
+> If all confidence intervals overlapped, participant identity would not matter.
+
+```{r fig9-caterpillar, fig.cap="Figure H8-9. Caterpillar plot of participant random intercepts from the null mixed model. Wide spread = high ICC.", fig.width=10, fig.height=6}
+if (is.na(icc_null)) {
+  cat("Figure H8-9 skipped: mixed model not available.\n")
+} else {
+  re_df <- ranef(m0, condVar = TRUE)$participant_ID
+  re_se_list <- attr(ranef(m0, condVar = TRUE)$participant_ID, "postVar")
+  re_se <- sqrt(apply(re_se_list, 3, function(x) x[1,1]))
+
+  caterpillar_df <- tibble(
+    participant_ID = rownames(re_df),
+    intercept      = re_df[["(Intercept)"]],
+    se             = re_se
+  ) %>%
+    arrange(intercept) %>%
+    mutate(
+      rank_idx = row_number(),
+      ci_low   = intercept - 1.96 * se,
+      ci_high  = intercept + 1.96 * se,
+      Colour   = case_when(
+        ci_low  > 0 ~ "Above average",
+        ci_high < 0 ~ "Below average",
+        TRUE        ~ "Overlaps zero"
+      )
+    )
+
+  p9 <- ggplot(caterpillar_df,
+               aes(x = rank_idx, y = intercept, colour = Colour)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+    geom_errorbar(aes(ymin = ci_low, ymax = ci_high),
+                  width = 0, alpha = 0.4, linewidth = 0.5) +
+    geom_point(size = 1.8, alpha = 0.85) +
+    scale_colour_manual(values = c(
+      "Above average" = "#2A9D8F",
+      "Overlaps zero" = "#90A4AE",
+      "Below average" = "#E76F51"
+    ), name = "95% CI") +
+    labs(
+      title    = "Figure H8-9: Caterpillar Plot of Participant Random Intercepts",
+      subtitle = sprintf("Null model ICC = %.3f | %d participants | Sorted by intercept magnitude",
+                         icc_null, nrow(caterpillar_df)),
+      x        = "Participant (ranked by random intercept)",
+      y        = "Random Intercept\n(deviation from grand mean CM)",
+      caption  = "95% CI bars. Teal = reliably above average. Orange = reliably below average. Grey = uncertain."
+    )
+
+  print(p9)
+  ggsave(file.path(output_dir, "H8_caterpillar.png"), p9,
+         width = 10, height = 6, dpi = 150)
+}
+```
+
+---
+
+# Step F: Paired Comparison Test (Delta ≠ 0?)
+
+> **Simple explanation:** Beyond looking at variability, we also ask: *on average*,
+> is there a voice effect at all? We use a paired-samples **Wilcoxon signed-rank test**
+> on the participant-level Active vs Passive CM means.
+
+```{r paired-test}
+cat("=== One-sample Wilcoxon test: Is mean Delta significantly different from 0? ===\n\n")
+
+wt <- wilcox.test(df_delta$Delta, mu = 0, alternative = "two.sided", exact = FALSE)
+cat(sprintf("  V statistic : %.1f\n",  wt$statistic))
+cat(sprintf("  p-value     : %.4f\n",  wt$p.value))
+cat(sprintf("  N           : %d\n\n",  nrow(df_delta)))
+
+if (wt$p.value < 0.05) {
+  cat("=> SIGNIFICANT: The mean Delta is significantly different from zero.\n")
+  cat("   On average, participants perform differently in Active vs Passive.\n")
+} else {
+  cat("=> NOT SIGNIFICANT: No reliable average voice effect.\n")
+  cat("   The mean Delta does not differ from zero, but individual variability\n")
+  cat("   (the SD of Delta) may still be large — indicating individual differences.\n")
+}
+
+# Also run paired Wilcoxon on matched pairs
+df_paired <- df_wide %>% filter(!is.na(CM_Active), !is.na(CM_Passive))
+wt_paired <- wilcox.test(df_paired$CM_Passive, df_paired$CM_Active,
+                          paired = TRUE, alternative = "two.sided", exact = FALSE)
+cat(sprintf("\n=== Paired Wilcoxon (Passive vs Active CM means per person) ===\n"))
+cat(sprintf("  V statistic : %.1f\n",  wt_paired$statistic))
+cat(sprintf("  p-value     : %.4f\n",  wt_paired$p.value))
+cat(sprintf("  N pairs     : %d\n",   nrow(df_paired)))
+
+tibble(
+  Test        = c("One-sample Wilcoxon (Delta vs 0)", "Paired Wilcoxon (Passive vs Active)"),
+  Statistic   = round(c(wt$statistic, wt_paired$statistic), 2),
+  p_value     = round(c(wt$p.value,   wt_paired$p.value),   4),
+  N           = c(nrow(df_delta), nrow(df_paired)),
+  Significant = ifelse(c(wt$p.value, wt_paired$p.value) < 0.05, "Yes (p < .05)", "No (p >= .05)")
+) %>%
+  kable(caption = "Table H8-4. Non-Parametric Tests of Average Voice Effect",
+        col.names = c("Test","Statistic","p-value","N","Significant?"),
+        booktabs = TRUE) %>%
+  kable_styling(
+    latex_options     = c("striped","HOLD_position"),
+    bootstrap_options = c("striped","hover"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+---
+
+# Final Conclusion
+
+```{r h8-conclusion, echo=FALSE, results='asis'}
+cat("## H8 Summary and Verdict\n\n")
+
+cat(paste0(
+  "This analysis investigated whether participants differ systematically in their ",
+  "sensitivity to grammatical voice (Active vs Passive), as measured by the ",
+  "Corrected Memorability (CM) score.\n\n"
+))
+
+cat("### Key Findings\n\n")
+
+# 1. Delta distribution
+cat(sprintf(
+  "**1. Voice Sensitivity Delta (Passive − Active CM):**  \n",
+  ""
+))
+cat(sprintf(
+  "The per-participant Delta ranged from **%.3f** to **%.3f** (SD = %.3f).  \n",
+  min(df_delta$Delta, na.rm=TRUE),
+  max(df_delta$Delta, na.rm=TRUE),
+  sd(df_delta$Delta,  na.rm=TRUE)
+))
+cat(sprintf(
+  "- **%.1f%%** of participants showed a positive Delta (Passive > Active)\n",
+  100 * mean(df_delta$Delta > 0, na.rm=TRUE)
+))
+cat(sprintf(
+  "- **%.1f%%** of participants showed a negative Delta (Active > Passive)\n\n",
+  100 * mean(df_delta$Delta < 0, na.rm=TRUE)
+))
+
+# 2. Multimodality
+cat(sprintf(
+  "**2. Multimodality Test (Hartigan Dip Test):**  \nD = %.5f, p = %.4f  \n",
+  dip_result$statistic, dip_result$p.value
+))
+if (dip_result$p.value < 0.05) {
+  cat("> The distribution is **significantly multimodal** — evidence for distinct subgroups.\n\n")
+} else {
+  cat("> The distribution is **unimodal** — no distinct subgroups detected, ",
+      "but the spread is still informative.\n\n")
+}
+
+# 3. ICC
+if (!is.na(icc_null)) {
+  cat(sprintf(
+    "**3. Variance Decomposition (ICC):**  \n",
+    ""
+  ))
+  cat(sprintf(
+    "The null mixed model estimated ICC = **%.3f**, meaning **%.1f%%** of total CM variance ",
+    icc_null, icc_null * 100
+  ))
+  cat("is attributable to stable between-person differences rather than experimental conditions.  \n")
+  if (icc_null > 0.30) {
+    cat("> **LARGE EFFECT:** Who the participant is explains a substantial fraction of performance.\n\n")
+  } else if (icc_null > 0.10) {
+    cat("> **MODERATE EFFECT:** Participant identity has a meaningful but not dominant role.\n\n")
+  } else {
+    cat("> **SMALL EFFECT:** Conditions and noise dominate over individual differences.\n\n")
+  }
+} else {
+  cat("**3. ICC:** Could not be computed (lme4 not available).  \n\n")
+}
+
+# 4. Average test
+cat(sprintf(
+  "**4. Average Voice Effect (Paired Wilcoxon):**  \nV = %.1f, p = %.4f  \n",
+  wt_paired$statistic, wt_paired$p.value
+))
+if (wt_paired$p.value < 0.05) {
+  cat("> **Significant.** On average, Passive and Active CM scores differ meaningfully.\n\n")
+} else {
+  cat("> **Not significant.** No reliable average difference — ",
+      "though individual variability exists.\n\n")
+}
+
+# Verdict
+cat("### Verdict\n\n")
+cat("| Question | Finding |\n")
+cat("|---|---|\n")
+cat(sprintf("| Is there individual variability? | **Yes** — SD of Delta = %.3f; range spans positive and negative |\n",
+            sd(df_delta$Delta, na.rm=TRUE)))
+cat(sprintf("| Is the distribution multimodal? | **%s** (Dip p = %.4f) |\n",
+            ifelse(dip_result$p.value < 0.05, "Yes", "No"),
+            dip_result$p.value))
+cat(sprintf("| What fraction of variance is between-person? | **%.1f%%** (ICC = %.3f) |\n",
+            ifelse(is.na(icc_null), 0, icc_null * 100),
+            ifelse(is.na(icc_null), 0, icc_null)))
+cat(sprintf("| Is there an average voice effect? | **%s** (p = %.4f) |\n",
+            ifelse(wt_paired$p.value < 0.05, "Yes", "No"), wt_paired$p.value))
+cat(sprintf("| H8 verdict | **%s** |\n",
+            ifelse(sd(df_delta$Delta, na.rm=TRUE) > 0.05 ||
+                   (!is.na(icc_null) && icc_null > 0.10),
+                   "SUPPORTED — meaningful individual differences in voice sensitivity exist",
+                   "PARTIALLY SUPPORTED — variability present but small")))
+```
+
+---
+
+# H8 Quick Reference
+
+```{r h8-quick-ref, echo=FALSE}
+tibble(
+  Item   = c("Design", "DV", "Key Analysis", "N participants",
+             "Mean Delta (P-A)", "SD of Delta",
+             "Dip test p-value", "ICC (null model)",
+             "Paired Wilcoxon p", "H8 Conclusion"),
+  Detail = c(
+    "Within-person repeated measures: Active vs Passive CM per participant",
+    "Corrected Memorability = Hit Rate - False Alarm Rate",
+    "Delta distribution, Dip test (multimodality), ICC (lme4 null model)",
+    as.character(nrow(df_delta)),
+    round(mean(df_delta$Delta, na.rm=TRUE), 4),
+    round(sd(df_delta$Delta,   na.rm=TRUE), 4),
+    round(dip_result$p.value,  4),
+    ifelse(is.na(icc_null), "Not computed", round(icc_null, 4)),
+    round(wt_paired$p.value,   4),
+    ifelse(sd(df_delta$Delta, na.rm=TRUE) > 0.05 ||
+           (!is.na(icc_null) && icc_null > 0.10),
+           "SUPPORTED", "PARTIALLY SUPPORTED")
+  )
+) %>%
+  kable(caption = "Table H8-5. H8 Complete Summary Reference",
+        col.names = c("What We Checked","Result"),
+        booktabs = TRUE) %>%
+  kable_styling(
+    latex_options     = c("striped","HOLD_position"),
+    bootstrap_options = c("striped","hover"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  column_spec(1, bold = TRUE, width = "6cm") %>%
+  column_spec(2, width = "9cm") %>%
+  row_spec(0,  bold = TRUE, background = HDR_COLOR, color = "white") %>%
+  row_spec(10, bold = TRUE, background = "#EBF5FB")
+```
+
+---
+
+*Report generated on `r Sys.time()` using R `r R.version.string`*

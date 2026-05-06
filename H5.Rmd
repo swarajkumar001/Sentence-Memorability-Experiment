@@ -1,0 +1,978 @@
+---
+title: "Hypothesis 5: Does Practice Performance Predict Memory?"
+subtitle: "Using Practice Phase Data as a Covariate in ANCOVA"
+author: "Team: Metamatics"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    latex_engine: xelatex
+    number_sections: true
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    fig_caption: true
+    highlight: tango
+    df_print: paged
+fontsize: 11pt
+geometry: margin=1in
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+  - \usepackage{fontspec}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = "center",
+  fig.width  = 7,
+  fig.height = 4,
+  out.width  = "100%",
+  dpi        = 150
+)
+
+# Install and load all needed packages
+pkgs <- c(
+  "dplyr", "tidyr", "tibble", "ggplot2", "readr", "stringr", "purrr",
+  "knitr", "kableExtra", "broom", "car", "lsr", "patchwork", "scales"
+)
+for (p in pkgs) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    install.packages(p, repos = "https://cran.r-project.org")
+  }
+  library(p, character.only = TRUE)
+}
+
+# Colour palette and theme settings
+PAL_H5    <- c("#A23B72", "#2E86AB", "#F18F01", "#C73E1D")
+PAL_VOICE <- c("Active" = "#2E86AB", "Passive" = "#A23B72")
+HDR_COLOR <- "#1B3A57"
+
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title    = element_text(face = "bold", size = 15, colour = "#2C2C2C"),
+      plot.subtitle = element_text(colour = "grey45", size = 11),
+      legend.position = "bottom",
+      panel.grid.minor = element_blank()
+    )
+)
+
+# Folder paths
+log_dir    <- file.path("Sentence Memorability", "NewLogsAnonymized")
+output_dir <- "R_output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+```
+
+---
+
+# What is Hypothesis 5?
+
+## The Simple Idea
+
+Before the real experiment started, every participant did a short **practice round**
+(about 8 warm-up trials). This was just to help them learn how to press the right
+keys. In our earlier analysis (H1 to H4), we simply threw away this practice data.
+
+But here is the key question: **What if the way someone performs during practice
+tells us something useful about how they will perform in the real experiment?**
+
+- A person who was **fast and accurate** in practice probably finds the task easy.
+- A person who was **slow and made lots of mistakes** in practice probably finds it harder.
+
+If this is true, then practice performance is what we call a **covariate** --- a
+background factor that quietly influences the results. By measuring it and
+including it in our model, we can remove its effect and get a cleaner picture
+of what our real variables (like sentence type and grammatical voice) actually do.
+
+## Where H5 Fits
+
+| Hypothesis | What we tested | Main tool |
+|---|---|---|
+| H1 | Does noun type (HH/HL/LH/LL) affect memory? | Kruskal-Wallis |
+| H2 | Does sentence voice (Active/Passive) affect memory? | Wilcoxon / t-test |
+| H3 | Does voice affect how accurately people judge wording? | Paired test |
+| H4 | Does voice affect how quickly people respond? | Paired test |
+| **H5** | Does practice performance predict final memory scores? | **ANCOVA** |
+
+H5 does not test a new condition. It tests whether **individual differences**
+captured in the practice phase carry over and affect the main results.
+
+---
+
+# The Formal Hypothesis
+
+## In Plain Words
+
+> **Null Hypothesis (H0):** How well someone does in practice does NOT predict
+> how well they do in the real experiment. Controlling for practice does not
+> change the main findings.
+
+> **Alternative Hypothesis (H5):** How well someone does in practice DOES
+> predict their final memory score. People who picked up the task quickly in
+> practice tend to remember sentences better overall.
+
+## The Math Behind It
+
+We fit a model that looks like this:
+
+$$\text{Memory Score} = \beta_0 + \beta_1 \times \text{Voice} + \beta_2 \times \text{Practice Speed} + \beta_3 \times \text{Practice Errors} + \varepsilon$$
+
+- **Memory Score** = Corrected Memorability (how well each person remembered sentences)
+- **Voice** = Was the sentence Active or Passive? (our main variable from H2)
+- **Practice Speed** = Average reaction time during practice (in milliseconds)
+- **Practice Errors** = Proportion of wrong answers during practice
+- **$\varepsilon$** = Leftover unexplained variation (noise)
+
+If $\beta_2$ or $\beta_3$ are statistically significant, then **H5 is supported**.
+
+## Decision Rule
+
+| Setting | Value |
+|---|---|
+| Significance level (alpha) | 0.05 |
+| Effect size measure | Partial eta-squared |
+| Statistical test | ANCOVA (Analysis of Covariance) |
+
+---
+
+# Step A: Collecting Practice Data
+
+## Reading the Log Files
+
+We go back to the raw log files but this time we **keep only the practice rows**
+(the ones labelled "Practice"), which we had previously removed.
+
+```{r extract-practice}
+log_files <- list.files(log_dir, pattern = "\\.log$", full.names = TRUE)
+cat(sprintf("Found %d participant log files.\n", length(log_files)))
+
+# Read all files, keep only Practice-phase events
+practice_raw <- log_files %>%
+  map_dfr(~ {
+    tryCatch(
+      {
+        d <- read_csv(.x, show_col_types = FALSE, col_types = cols(.default = "c"))
+        d %>% filter(str_starts(Event, "Practice"))
+      },
+      error = function(e) tibble()
+    )
+  }) %>%
+  mutate(
+    participant_ID   = as.integer(participant_ID),
+    `Accuracy IR`    = suppressWarnings(as.numeric(`Accuracy IR`)),
+    Reaction_time_IR = suppressWarnings(as.numeric(Reaction_time_IR))
+  )
+
+cat(sprintf(
+  "Extracted %s practice events from all participants.\n",
+  format(nrow(practice_raw), big.mark = ",")
+))
+cat(sprintf(
+  "Number of participants with practice data: %d\n",
+  n_distinct(practice_raw$participant_ID)
+))
+```
+
+## Computing Two Scores Per Participant
+
+For each participant, we calculate two simple numbers from their practice data:
+
+| Score Name | What it measures | What it tells us |
+|---|---|---|
+| `covariate_RT` | Average time to press the key in practice (ms) | How fast their basic reactions were |
+| `covariate_Error` | Fraction of wrong answers in practice | How quickly they grasped the task rules |
+
+```{r compute-covariates}
+# Keep only the key-press events from practice
+practice_prof <- practice_raw %>%
+  filter(str_detect(Event, "IR pressed")) %>%
+  group_by(participant_ID) %>%
+  summarise(
+    practice_trials = n(),
+    covariate_RT    = mean(Reaction_time_IR, na.rm = TRUE),
+    covariate_Error = 1 - mean(`Accuracy IR`, na.rm = TRUE),
+    .groups         = "drop"
+  ) %>%
+  filter(!is.na(covariate_RT), !is.na(covariate_Error))
+
+write_csv(practice_prof, file.path(output_dir, "H5_practice_covariates.csv"))
+
+cat(sprintf("Practice scores ready for %d participants.\n", nrow(practice_prof)))
+
+# Show a preview of the data
+practice_prof %>%
+  head(10) %>%
+  kable(
+    caption   = "Table 1. Preview of Practice Scores (first 10 participants)",
+    col.names = c("Participant", "Practice Trials", "Mean RT (ms)", "Error Rate"),
+    digits    = 3,
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+## Summary Statistics for Practice Scores
+
+```{r cov-descriptives}
+practice_prof %>%
+  summarise(
+    N          = n(),
+    Mean_RT    = round(mean(covariate_RT, na.rm = TRUE), 2),
+    SD_RT      = round(sd(covariate_RT, na.rm = TRUE), 2),
+    Min_RT     = round(min(covariate_RT, na.rm = TRUE), 2),
+    Max_RT     = round(max(covariate_RT, na.rm = TRUE), 2),
+    Mean_Error = round(mean(covariate_Error, na.rm = TRUE), 4),
+    SD_Error   = round(sd(covariate_Error, na.rm = TRUE), 4),
+    Min_Error  = round(min(covariate_Error, na.rm = TRUE), 4),
+    Max_Error  = round(max(covariate_Error, na.rm = TRUE), 4)
+  ) %>%
+  pivot_longer(everything(), names_to = "Statistic", values_to = "Value") %>%
+  kable(
+    caption  = "Table 2. Summary of Practice Scores Across All Participants",
+    digits   = 4,
+    booktabs = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  )
+```
+
+---
+
+# Step B: Merging Practice Scores with Main Results
+
+We now attach each participant's practice scores to their main experiment memory
+scores. We load the memory data produced by the H3/H4 analysis.
+
+```{r merge-main-data}
+h3h4_file <- file.path(output_dir, "H3H4_step3_analysis.csv")
+
+if (!file.exists(h3h4_file)) {
+  stop(paste(
+    "File not found:", h3h4_file,
+    "\nPlease knit H3_and_H4_Metametrics.Rmd first."
+  ))
+}
+
+main_df <- read_csv(h3h4_file, show_col_types = FALSE)
+
+# Get one corrected memorability score per participant per voice condition
+cm_by_voice <- main_df %>%
+  distinct(participant_ID, Voice_Label, corrected_memorability) %>%
+  filter(!is.na(corrected_memorability), Voice_Label %in% c("Active", "Passive"))
+
+# Attach practice scores
+ancova_df <- cm_by_voice %>%
+  inner_join(practice_prof, by = "participant_ID")
+
+cat(sprintf("Final dataset: %d rows (%d participants x 2 voice conditions)\n",
+            nrow(ancova_df), n_distinct(ancova_df$participant_ID)))
+
+write_csv(ancova_df, file.path(output_dir, "H5_ancova_dataset.csv"))
+```
+
+---
+
+# Step C: Checking ANCOVA Assumptions
+
+Before we run ANCOVA, we need to check 4 rules. If these rules are broken,
+ANCOVA cannot be trusted.
+
+## Rule 1 - Linearity
+
+**What it means:** The relationship between practice scores and memory scores
+should follow a straight line (not a curve).
+
+**How we check:** Plot the data and compare a straight line fit with a curved
+(LOESS) smoother. If they match closely, we are good.
+
+```{r assumption-linearity, fig.cap="Figure 1. Linearity check. Top: Practice speed vs. memory score. Bottom: Practice error rate vs. memory score. Solid line = straight-line fit. Dashed line = curved fit. They should look similar.", fig.width=7, fig.height=7, out.width="100%"}
+p_lin1 <- ggplot(ancova_df, aes(x = covariate_RT, y = corrected_memorability)) +
+  geom_point(alpha = 0.5, colour = PAL_H5[2], size = 1.8) +
+  geom_smooth(method = "lm",    colour = PAL_H5[1], fill = "grey80",
+              se = TRUE,  linewidth = 1.0, linetype = "solid") +
+  geom_smooth(method = "loess", colour = PAL_H5[3], fill = NA,
+              se = FALSE, linewidth = 0.9, linetype = "dashed") +
+  labs(
+    title    = "Fig 1a: Practice Speed vs. Memory Score",
+    subtitle = "Solid = straight-line fit | Dashed = curved fit",
+    x        = "Average Practice Reaction Time (ms)",
+    y        = "Corrected Memorability (CM)"
+  )
+
+p_lin2 <- ggplot(ancova_df, aes(x = covariate_Error, y = corrected_memorability)) +
+  geom_point(alpha = 0.5, colour = PAL_H5[4], size = 1.8) +
+  geom_smooth(method = "lm",    colour = PAL_H5[1], fill = "grey80",
+              se = TRUE,  linewidth = 1.0, linetype = "solid") +
+  geom_smooth(method = "loess", colour = PAL_H5[3], fill = NA,
+              se = FALSE, linewidth = 0.9, linetype = "dashed") +
+  labs(
+    title    = "Fig 1b: Practice Error Rate vs. Memory Score",
+    subtitle = "Solid = straight-line fit | Dashed = curved fit",
+    x        = "Practice Error Rate (0 = no errors, 1 = all wrong)",
+    y        = "Corrected Memorability (CM)"
+  )
+
+# Stack vertically so neither plot is clipped
+p_lin1 / p_lin2
+ggsave(file.path(output_dir, "H5_assumption_linearity.png"),
+       p_lin1 / p_lin2, width = 7, height = 7, dpi = 150)
+```
+
+> **Reading this plot:** If the solid and dashed lines are close together,
+> the linearity assumption is OK. A big difference means the relationship is curved
+> and we might need to transform the data.
+
+## Rule 2 - Residuals Should Be Normally Distributed
+
+**What it means:** After the model explains what it can, the leftover errors
+(called residuals) should follow a bell-curve shape.
+
+**How we check:** Shapiro-Wilk test. A p-value above 0.05 means we are OK.
+
+```{r assumption-normality}
+# Fit a test model and inspect its residuals
+prelim_fit <- lm(
+  corrected_memorability ~ Voice_Label + covariate_RT + covariate_Error,
+  data = ancova_df
+)
+
+resid_vals <- residuals(prelim_fit)
+sw_test    <- shapiro.test(resid_vals)
+
+tibble(
+  Test      = "Shapiro-Wilk test on model residuals",
+  W         = round(as.numeric(sw_test$statistic), 4),
+  p_value   = round(as.numeric(sw_test$p.value), 4),
+  Result    = ifelse(as.numeric(sw_test$p.value) > 0.05,
+                     "OK (p > 0.05)", "Not OK (p <= 0.05)")
+) %>%
+  kable(
+    caption   = "Table 3. Are the model residuals normally distributed? (Shapiro-Wilk Test)",
+    col.names = c("Test", "W statistic", "p-value", "Conclusion"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+```{r assumption-normality-plot, fig.cap="Figure 2. Are the model errors normally distributed? Top: Q-Q plot (points should follow the line). Bottom: Histogram (should be a bell shape).", fig.width=7, fig.height=7, out.width="100%"}
+qq_df <- tibble(residuals = resid_vals)
+
+p_qq <- ggplot(qq_df, aes(sample = residuals)) +
+  stat_qq(colour = PAL_H5[2], alpha = 0.6, size = 1.8) +
+  stat_qq_line(colour = PAL_H5[1], linewidth = 1) +
+  labs(
+    title    = "Fig 2a: Q-Q Plot of Model Residuals",
+    subtitle = "Points should lie close to the diagonal line",
+    x        = "Expected (theoretical) values",
+    y        = "Actual residual values"
+  )
+
+p_hist <- ggplot(qq_df, aes(x = residuals)) +
+  geom_histogram(bins = 20, fill = PAL_H5[2], alpha = 0.7, colour = "white") +
+  geom_vline(xintercept = 0, colour = PAL_H5[1], linewidth = 1, linetype = "dashed") +
+  labs(
+    title    = "Fig 2b: Histogram of Model Residuals",
+    subtitle = "Should be a bell shape centred at zero",
+    x        = "Residual value",
+    y        = "Count"
+  )
+
+# Stack vertically so neither plot is clipped
+p_qq / p_hist
+ggsave(file.path(output_dir, "H5_assumption_normality.png"),
+       p_qq / p_hist, width = 7, height = 7, dpi = 150)
+```
+
+## Rule 3 - Equal Variance Across Groups (Levene's Test)
+
+**What it means:** The spread of memory scores should be roughly the same
+for the Active voice group and the Passive voice group.
+
+**How we check:** Levene's test. A p-value above 0.05 means the spreads are
+similar enough.
+
+```{r assumption-levene}
+levene_result <- leveneTest(
+  corrected_memorability ~ Voice_Label,
+  data   = ancova_df,
+  center = mean
+)
+
+tibble(
+  Test      = "Levene's Test (Active vs Passive groups)",
+  F_stat    = round(levene_result$`F value`[1], 3),
+  df1       = levene_result$Df[1],
+  df2       = levene_result$Df[2],
+  p_value   = round(levene_result$`Pr(>F)`[1], 4),
+  Result    = ifelse(levene_result$`Pr(>F)`[1] > 0.05,
+                     "OK (p > 0.05)", "Not OK (p <= 0.05)")
+) %>%
+  kable(
+    caption   = "Table 4. Are the group variances roughly equal? (Levene's Test)",
+    col.names = c("Test", "F", "df1", "df2", "p-value", "Conclusion"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+## Rule 4 - Parallel Regression Slopes (Most Important Rule)
+
+**What it means:** The practice scores should affect Active and Passive sentences
+**in the same way**. If practice speed helps Active-sentence memory but hurts
+Passive-sentence memory (or vice versa), ANCOVA becomes unreliable.
+
+**How we check:** We add a "practice x voice" interaction term to the model. If
+it is **not significant** (p > 0.05), the slopes are parallel and ANCOVA is valid.
+
+```{r assumption-hors}
+# Add interaction terms to test if slopes differ across Voice conditions
+hors_fit <- lm(
+  corrected_memorability ~
+    Voice_Label * covariate_RT +
+    Voice_Label * covariate_Error,
+  data = ancova_df
+)
+
+hors_anova <- Anova(hors_fit, type = "III")
+
+hors_anova %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Term") %>%
+  rename(
+    SS        = `Sum Sq`,
+    df        = Df,
+    F_value   = `F value`,
+    p_value   = `Pr(>F)`
+  ) %>%
+  mutate(
+    F_value   = round(F_value, 3),
+    p_value   = round(p_value, 4),
+    Important = ifelse(!is.na(p_value) & p_value < 0.05,
+                       "Significant (problem!)", "Not significant (good)")
+  ) %>%
+  kable(
+    caption  = "Table 5. Parallel Slopes Test (interaction terms should NOT be significant)",
+    booktabs = TRUE,
+    digits   = 4
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position", "scale_down"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+```{r hors-visualise, fig.cap="Figure 3. Parallel slopes check. Top: Practice speed vs. memory by voice. Bottom: Practice errors vs. memory by voice. Parallel lines across blue (Active) and pink (Passive) mean the assumption is met.", fig.width=7, fig.height=7, out.width="100%"}
+p_hors1 <- ggplot(ancova_df,
+  aes(x = covariate_RT, y = corrected_memorability, colour = Voice_Label)) +
+  geom_point(alpha = 0.5, size = 1.8) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.0) +
+  scale_colour_manual(values = PAL_VOICE, name = "Voice") +
+  labs(
+    title    = "Fig 3a: Practice Speed vs. Memory (by Voice)",
+    subtitle = "Parallel lines = slopes assumption met",
+    x        = "Mean Practice Reaction Time (ms)",
+    y        = "Corrected Memorability"
+  )
+
+p_hors2 <- ggplot(ancova_df,
+  aes(x = covariate_Error, y = corrected_memorability, colour = Voice_Label)) +
+  geom_point(alpha = 0.5, size = 1.8) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.0) +
+  scale_colour_manual(values = PAL_VOICE, name = "Voice") +
+  labs(
+    title    = "Fig 3b: Practice Errors vs. Memory (by Voice)",
+    subtitle = "Parallel lines = slopes assumption met",
+    x        = "Practice Error Rate",
+    y        = "Corrected Memorability"
+  )
+
+# Stack vertically so neither plot is clipped
+p_hors1 / p_hors2
+ggsave(file.path(output_dir, "H5_assumption_hors.png"),
+       p_hors1 / p_hors2, width = 7, height = 7, dpi = 150)
+```
+
+> **Reading this plot:** We want the blue and pink lines to run **roughly parallel**.
+> If one line tilts up while the other tilts down, the assumption is broken.
+
+---
+
+# Step D: Running the ANCOVA
+
+## The Main Model
+
+Now we run the actual ANCOVA --- voice condition plus both practice covariates
+together predicting memory scores.
+
+```{r ancova-model}
+# Main ANCOVA model
+ancova_fit <- lm(
+  corrected_memorability ~ Voice_Label + covariate_RT + covariate_Error,
+  data = ancova_df
+)
+
+# Get the full ANOVA table (Type III controls for overlap between predictors)
+ancova_anova <- Anova(ancova_fit, type = "III")
+```
+
+## Effect Sizes
+
+We calculate **partial eta-squared** ($\eta^2_p$) for each predictor. This tells
+us what percentage of the remaining variation each predictor explains.
+
+- Below 0.01 = negligible effect
+- 0.01 to 0.06 = small effect
+- 0.06 to 0.14 = medium effect
+- Above 0.14 = large effect
+
+```{r ancova-eta-squared}
+ss_error <- ancova_anova["Residuals", "Sum Sq"]
+
+ancova_table <- ancova_anova %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Term") %>%
+  filter(Term != "(Intercept)") %>%
+  rename(
+    SS      = `Sum Sq`,
+    df      = Df,
+    F_value = `F value`,
+    p_value = `Pr(>F)`
+  ) %>%
+  mutate(
+    Partial_eta2 = ifelse(
+      Term != "Residuals",
+      round(SS / (SS + ss_error), 4),
+      NA_real_
+    ),
+    F_value     = round(F_value, 3),
+    p_value     = round(p_value, 4),
+    Significant = case_when(
+      is.na(p_value)   ~ "N/A",
+      p_value < 0.001  ~ "Yes (p < 0.001)",
+      p_value < 0.01   ~ "Yes (p < 0.01)",
+      p_value < 0.05   ~ "Yes (p < 0.05)",
+      TRUE             ~ "No"
+    ),
+    Effect_Size = case_when(
+      is.na(Partial_eta2)    ~ "N/A",
+      Partial_eta2 >= 0.14   ~ "Large",
+      Partial_eta2 >= 0.06   ~ "Medium",
+      Partial_eta2 >= 0.01   ~ "Small",
+      TRUE                   ~ "Negligible"
+    )
+  )
+
+ancova_table %>%
+  kable(
+    caption  = "Table 6. ANCOVA Results: What predicts memory scores?",
+    booktabs = TRUE,
+    digits   = 4,
+    col.names = c("Predictor", "SS", "df", "F", "p-value",
+                  "Partial eta-sq", "Significant?", "Effect Size")
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position", "scale_down"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+## Regression Coefficients
+
+This table shows the direction and size of each predictor's effect.
+A **negative coefficient** for Practice RT means: slower practice = lower memory score.
+A **positive coefficient** would mean the opposite.
+
+```{r ancova-coefficients}
+tidy(ancova_fit) %>%
+  mutate(
+    estimate  = round(estimate, 5),
+    std.error = round(std.error, 5),
+    statistic = round(statistic, 3),
+    p.value   = round(p.value, 4),
+    Direction = case_when(
+      estimate > 0 ~ "Positive",
+      estimate < 0 ~ "Negative",
+      TRUE         ~ "Zero"
+    ),
+    Significant = ifelse(p.value < 0.05, "Yes", "No")
+  ) %>%
+  rename(
+    Predictor = term,
+    Estimate  = estimate,
+    Std_Error = std.error,
+    t_value   = statistic,
+    p_value   = p.value
+  ) %>%
+  kable(
+    caption  = "Table 7. How much does each predictor change the memory score?",
+    booktabs = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position", "scale_down"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+## Overall Model Quality
+
+```{r ancova-fit-summary}
+f_stat    <- summary(ancova_fit)$fstatistic
+overall_p <- pf(f_stat[1], f_stat[2], f_stat[3], lower.tail = FALSE)
+
+tibble(
+  Metric  = c("R-squared (how much variance explained)",
+              "Adjusted R-squared",
+              "F-statistic",
+              "Overall p-value"),
+  Value   = c(
+    round(summary(ancova_fit)$r.squared, 4),
+    round(summary(ancova_fit)$adj.r.squared, 4),
+    round(f_stat[1], 3),
+    round(overall_p, 4)
+  )
+) %>%
+  kable(
+    caption  = "Table 8. How well does the overall ANCOVA model fit the data?",
+    booktabs = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+
+cat(sprintf("\nR-squared      : %.4f\n", summary(ancova_fit)$r.squared))
+cat(sprintf("Adjusted R-sq  : %.4f\n", summary(ancova_fit)$adj.r.squared))
+cat(sprintf("Overall p-value: %.4f\n", overall_p))
+
+if (overall_p < 0.05) {
+  cat("\nDECISION: REJECT H0 --- The overall ANCOVA model is significant.\n")
+} else {
+  cat("\nDECISION: KEEP H0 --- The overall ANCOVA model is NOT significant.\n")
+}
+```
+
+---
+
+# Visualising the Results
+
+## Adjusted vs Raw Memory Scores by Voice
+
+This plot compares memory scores **before** and **after** we control for practice
+performance. If the adjusted bars look different from the raw bars, practice
+proficiency was affecting our results.
+
+```{r adjusted-means, fig.cap="Figure 4. Memory scores by voice condition. Purple bars = adjusted scores after removing the practice effect. Blue bars = raw unadjusted scores. If they differ, practice was influencing the results.", fig.width=7, fig.height=4, out.width="100%"}
+mean_rt    <- mean(ancova_df$covariate_RT,    na.rm = TRUE)
+mean_error <- mean(ancova_df$covariate_Error, na.rm = TRUE)
+
+adj_means <- tibble(
+  Voice_Label     = c("Active", "Passive"),
+  covariate_RT    = mean_rt,
+  covariate_Error = mean_error
+) %>%
+  mutate(adj_CM = predict(ancova_fit, newdata = .))
+
+raw_means <- ancova_df %>%
+  group_by(Voice_Label) %>%
+  summarise(raw_CM = mean(corrected_memorability, na.rm = TRUE), .groups = "drop")
+
+comp_df <- adj_means %>%
+  left_join(raw_means, by = "Voice_Label") %>%
+  pivot_longer(
+    cols      = c(adj_CM, raw_CM),
+    names_to  = "Type",
+    values_to = "CM"
+  ) %>%
+  mutate(
+    Type = case_when(
+      Type == "adj_CM" ~ "Adjusted (ANCOVA)",
+      Type == "raw_CM" ~ "Unadjusted (raw mean)",
+      TRUE             ~ Type
+    )
+  )
+
+ggplot(comp_df, aes(x = Voice_Label, y = CM, fill = Type)) +
+  geom_col(position = position_dodge(0.65), width = 0.55, alpha = 0.85) +
+  scale_fill_manual(values = c("Adjusted (ANCOVA)"     = PAL_H5[1],
+                               "Unadjusted (raw mean)" = PAL_H5[2])) +
+  labs(
+    title    = "Adjusted vs. Raw Memory Scores by Voice Condition",
+    subtitle = "Adjusted = after removing practice effect | Raw = before adjustment",
+    x        = "Voice Condition",
+    y        = "Corrected Memorability (CM)",
+    fill     = "Score Type"
+  ) +
+  theme(legend.position = "right")
+
+ggsave(file.path(output_dir, "H5_adjusted_vs_raw_means.png"),
+       last_plot(), width = 7, height = 4, dpi = 150)
+```
+
+## Practice Speed and Memory Scores
+
+```{r scatter-rt, fig.cap="Figure 5. Each dot is one participant. Does being faster in practice lead to higher memory scores? Blue = Active sentences. Pink = Passive sentences.", fig.width=7, fig.height=4, out.width="100%"}
+ggplot(ancova_df, aes(x = covariate_RT, y = corrected_memorability,
+                      colour = Voice_Label)) +
+  geom_point(alpha = 0.6, size = 2.8) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.1) +
+  scale_colour_manual(values = PAL_VOICE, name = "Voice") +
+  labs(
+    title    = "Practice Speed vs. Final Memory Score",
+    subtitle = "Does being faster in practice help you remember better?",
+    x        = "Average Practice Reaction Time (ms) --- lower = faster",
+    y        = "Corrected Memorability (CM)"
+  )
+
+ggsave(file.path(output_dir, "H5_scatter_RT.png"),
+       last_plot(), width = 7, height = 4, dpi = 150)
+```
+
+## Practice Errors and Memory Scores
+
+```{r scatter-error, fig.cap="Figure 6. Each dot is one participant. Does making more errors in practice lead to lower memory scores? Blue = Active sentences. Pink = Passive sentences.", fig.width=7, fig.height=4, out.width="100%"}
+ggplot(ancova_df, aes(x = covariate_Error, y = corrected_memorability,
+                      colour = Voice_Label)) +
+  geom_point(alpha = 0.6, size = 2.8) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.1) +
+  scale_colour_manual(values = PAL_VOICE, name = "Voice") +
+  labs(
+    title    = "Practice Errors vs. Final Memory Score",
+    subtitle = "Does making more mistakes in practice hurt your memory later?",
+    x        = "Practice Error Rate (0 = no errors, 1 = all wrong)",
+    y        = "Corrected Memorability (CM)"
+  )
+
+ggsave(file.path(output_dir, "H5_scatter_Error.png"),
+       last_plot(), width = 7, height = 4, dpi = 150)
+```
+
+---
+
+# Collinearity Check
+
+Are the two practice scores highly correlated with each other? If they are,
+they are measuring the same thing and we only need to keep one.
+
+```{r collinearity-check}
+r_cov <- cor(ancova_df$covariate_RT, ancova_df$covariate_Error,
+             use = "complete.obs")
+
+cat(sprintf("Correlation between Practice Speed and Practice Errors: r = %.4f\n", r_cov))
+
+if (abs(r_cov) > 0.8) {
+  cat("WARNING: The two scores are very similar (|r| > 0.8). Consider using only one.\n")
+} else {
+  cat("The two scores are different enough to use both together. No problem.\n")
+}
+```
+
+---
+
+# Final Decision
+
+```{r h5-decision, echo=FALSE, results='asis'}
+p_rt  <- ancova_table %>% filter(Term == "covariate_RT")    %>% pull(p_value)
+p_err <- ancova_table %>% filter(Term == "covariate_Error") %>% pull(p_value)
+covariates_significant <- (p_rt < 0.05) | (p_err < 0.05)
+
+cat("## Was H5 Supported?\n\n")
+
+if (covariates_significant) {
+  cat(paste0(
+    "**Decision: REJECT the Null Hypothesis (H0)**\n\n",
+    "At least one practice score significantly predicted how well participants ",
+    "remembered sentences. This means **practice performance does carry over** ",
+    "into the real experiment.\n\n",
+    "In simple terms: participants who did better in the warm-up phase also tended ",
+    "to remember more sentences in the actual experiment.\n\n",
+    "**What this means for future research:** When running experiments like this, ",
+    "researchers should always include practice phase scores as a covariate. ",
+    "This makes the statistical models more accurate by removing background noise ",
+    "caused by individual differences in how quickly people pick up new tasks."
+  ))
+} else {
+  cat(paste0(
+    "**Decision: KEEP the Null Hypothesis (H0)**\n\n",
+    "Neither practice score significantly predicted final memory performance. ",
+    "This means that how well someone did in warm-up did NOT consistently predict ",
+    "how they did in the real experiment.\n\n",
+    "In simple terms: some people were slow in practice but did fine in the real ",
+    "task, and vice versa. The warm-up did not measure something that sticks.\n\n",
+    "**What this means:** In this dataset, the main experiment results are driven ",
+    "by the actual experimental conditions (noun type, grammatical voice), not by ",
+    "how fast people learned the button presses. The H1-H4 findings stand on their own."
+  ))
+}
+```
+
+---
+
+# Data Flow Summary and Conclusion
+
+This section shows the complete journey of the data for Hypothesis 5, from raw
+log files all the way to the final conclusion.
+
+```
+STEP 1: Raw Data (114 participant log files)
+        |
+        | Filter: keep ONLY practice-phase rows
+        v
+STEP 2: Practice Data Extracted
+        - Events labelled "Practice" kept
+        - All main-experiment rows ignored here
+        |
+        | Calculate per participant:
+        |   (a) Average reaction time in practice  --> covariate_RT
+        |   (b) Error rate in practice             --> covariate_Error
+        v
+STEP 3: Practice Scores Ready (one row per participant)
+        |
+        | Load main experiment memory scores from H3/H4 output
+        | (H3H4_step3_analysis.csv)
+        |   --> Corrected Memorability per participant x Voice condition
+        |
+        | Merge by participant_ID
+        v
+STEP 4: Combined Dataset
+        - Columns: participant_ID, Voice_Label,
+                   corrected_memorability, covariate_RT, covariate_Error
+        |
+        | Check 4 ANCOVA assumptions:
+        |   (1) Linearity          -- visual check with scatter + LOESS
+        |   (2) Normal residuals   -- Shapiro-Wilk test
+        |   (3) Equal variances    -- Levene's test
+        |   (4) Parallel slopes    -- interaction model test
+        v
+STEP 5: Assumptions Checked
+        |
+        | Fit ANCOVA model:
+        |   Memory = Voice + Practice_RT + Practice_Error
+        |
+        | Extract: F-statistics, p-values, partial eta-squared
+        v
+STEP 6: ANCOVA Results
+        |
+        | Compare: adjusted means vs raw means
+        | Visualise: scatter plots for each covariate
+        v
+STEP 7: FINAL CONCLUSION
+        If Practice RT or Practice Errors are significant (p < 0.05):
+            --> H0 rejected: practice performance predicts memory
+            --> Future models should include these as covariates
+        Else:
+            --> H0 retained: practice performance does NOT predict memory
+            --> Main experiment effects are independent of practice performance
+```
+
+## Summary Table
+
+```{r summary-table, echo=FALSE}
+tibble(
+  Step   = c(
+    "Data Source",
+    "Practice Covariates",
+    "Main Outcome (DV)",
+    "Main Group Variable (IV)",
+    "Statistical Test",
+    "Assumption 1: Linearity",
+    "Assumption 2: Normal Residuals",
+    "Assumption 3: Equal Variance",
+    "Assumption 4: Parallel Slopes",
+    "Practice RT significant?",
+    "Practice Errors significant?",
+    "Overall Model significant?",
+    "Final Decision"
+  ),
+  Result = c(
+    "114 log files from Sentence Memorability experiment",
+    "covariate_RT (practice speed), covariate_Error (practice errors)",
+    "Corrected Memorability = Hit Rate minus False Alarm Rate",
+    "Grammatical Voice (Active or Passive)",
+    "ANCOVA with Type III sums of squares and partial eta-squared",
+    "Checked visually with scatter plot and LOESS smoother",
+    ifelse(sw_test$p.value > 0.05,
+           paste0("Met (Shapiro-Wilk p = ", round(sw_test$p.value, 3), ")"),
+           paste0("Violated (Shapiro-Wilk p = ", round(sw_test$p.value, 3), ")")),
+    ifelse(levene_result$`Pr(>F)`[1] > 0.05,
+           paste0("Met (Levene p = ", round(levene_result$`Pr(>F)`[1], 3), ")"),
+           paste0("Violated (Levene p = ", round(levene_result$`Pr(>F)`[1], 3), ")")),
+    ifelse(all(ancova_table %>%
+      filter(grepl(":", Term)) %>%
+      pull(p_value) > 0.05, na.rm = TRUE),
+      "Met -- slopes are parallel across Voice conditions",
+      "Violated -- slopes differ across Voice conditions"),
+    ifelse(p_rt < 0.05,
+           paste0("Yes (p = ", round(p_rt, 3), ")"),
+           paste0("No (p = ", round(p_rt, 3), ")")),
+    ifelse(p_err < 0.05,
+           paste0("Yes (p = ", round(p_err, 3), ")"),
+           paste0("No (p = ", round(p_err, 3), ")")),
+    ifelse(overall_p < 0.05,
+           paste0("Yes (p = ", round(overall_p, 3), ")"),
+           paste0("No (p = ", round(overall_p, 3), ")")),
+    ifelse(covariates_significant,
+      "REJECT H0: Practice performance predicts memory scores",
+      "KEEP H0: Practice performance does NOT predict memory scores")
+  )
+) %>%
+  kable(
+    caption   = "Table 9. Complete H5 Summary -- from data to decision",
+    col.names = c("What We Checked", "Result"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    position          = "center"
+  ) %>%
+  column_spec(1, bold = TRUE, width = "6cm") %>%
+  column_spec(2, width = "9cm") %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white") %>%
+  row_spec(13, bold = TRUE, background = "#EBF5FB")
+```

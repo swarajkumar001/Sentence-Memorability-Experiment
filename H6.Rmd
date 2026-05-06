@@ -1,0 +1,1110 @@
+---
+title: "Hypothesis 6: Does Fatigue Slow People Down Over Time?"
+subtitle: "Checking if Reaction Time and Accuracy Change Across the Experiment"
+author: "Team: Metamatics"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    latex_engine: xelatex
+    number_sections: true
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    fig_caption: true
+    highlight: tango
+    df_print: paged
+fontsize: 11pt
+geometry: margin=1in
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.align  = "center",
+  fig.width  = 7,
+  fig.height = 4,
+  out.width  = "100%",
+  dpi        = 150
+)
+
+pkgs <- c(
+  "dplyr", "tidyr", "tibble", "ggplot2", "readr", "stringr",
+  "purrr", "knitr", "kableExtra", "scales", "patchwork"
+)
+for (p in pkgs) {
+  if (!requireNamespace(p, quietly = TRUE))
+    install.packages(p, repos = "https://cran.r-project.org")
+  library(p, character.only = TRUE)
+}
+
+PAL_BLOCKS <- c("1: Early" = "#2E86AB", "2: Middle" = "#F18F01", "3: Late" = "#C73E1D")
+HDR_COLOR  <- "#1B3A57"
+
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14, colour = "#2C2C2C"),
+      plot.subtitle    = element_text(colour = "grey45", size = 11),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+)
+
+log_dir    <- "Sentence Memorability/NewLogsAnonymized"
+output_dir <- "R_output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# ── Pre-initialise test-result variables so the summary table never crashes ──
+# These are overwritten by the actual test chunks below.
+chi_rt       <- NA_real_;  df_rt  <- NA_real_;  p_rt  <- NA_real_
+chi_acc      <- NA_real_;  df_acc <- NA_real_;  p_acc <- NA_real_
+test_name_rt  <- "Not yet run"
+test_name_acc <- "Not yet run"
+```
+
+---
+
+# What is Hypothesis 6?
+
+## The Simple Idea
+
+Think about any long task you have done — like sitting through a 3-hour exam.
+By the end, your brain is tired. You might take longer to answer questions or
+make more mistakes than at the start. This is called **cognitive fatigue**.
+
+In our experiment, each participant sat through roughly **30 minutes** of
+reading and recognising sentences — lots of trials in total.
+
+> **Do people get slower or less accurate as the experiment goes on?**
+
+If yes, then fatigue is a real problem in this experiment. It means the results
+from H1 to H5 could be slightly biased — the differences we see might partly
+be caused by tiredness, not just the sentence type or voice.
+
+## How We Test It
+
+We split each participant's experiment into **3 equal time blocks**:
+
+| Block | When | What it represents |
+|---|---|---|
+| Block 1: Early | First third of trials | Fresh, not yet tired |
+| Block 2: Middle | Middle third of trials | Settling in |
+| Block 3: Late | Last third of trials | Potentially fatigued |
+
+We then check **two things**:
+
+1. **Reaction Time (RT)** — Does it take longer to press the key later in the experiment?
+2. **Accuracy** — Do people make more mistakes later in the experiment?
+
+---
+
+# Formal Hypothesis
+
+## In Plain Words
+
+> **Null Hypothesis (H0):** Reaction time and accuracy do NOT change significantly
+> across the three time blocks. People perform the same throughout the experiment.
+
+> **Alternative Hypothesis (H6):** Reaction time increases and/or accuracy decreases
+> significantly from Early to Late blocks, showing that cognitive fatigue builds up.
+
+## The Tests We Use
+
+| Outcome | Test (if non-normal) | Why |
+|---|---|---|
+| Reaction Time (RT) | Friedman Test | RT is right-skewed; non-parametric test is safer |
+| Accuracy | Friedman Test | Accuracy is bounded 0–1; often non-normal |
+
+We check normality first with **Shapiro-Wilk** and **Q-Q plots** before deciding.
+
+---
+
+# Step 0: Participant Validation
+
+## Why Do We Need This?
+
+Not every participant should be in the analysis. Some people may have clicked
+randomly, zoned out, or not understood the task. We check this using special
+**validation sentences** — easy, obviously repeated sentences that anyone paying
+attention should recognise.
+
+## The Validation Formula
+
+$$\text{Correct Hits} > \frac{\text{Wrong IR Presses}}{2} + \text{Missed IRs}$$
+
+Where:
+
+- **Correct Hits** = validation repeats where the person pressed spacebar ✅
+- **Wrong IR Presses** = non-repeats where they pressed spacebar ❌
+- **Missed IRs** = validation repeats where they did NOT press spacebar ❌
+
+In simple words: **your correct responses must clearly outnumber your mistakes.**
+
+```{r load-all-for-validation}
+log_files <- list.files(log_dir, pattern = "\\.log$", full.names = TRUE)
+cat(sprintf("Found %d log files.\n", length(log_files)))
+
+raw_all <- log_files %>%
+  map_dfr(~ {
+    tryCatch(
+      read_csv(.x, show_col_types = FALSE, col_types = cols(.default = "c")),
+      error = function(e) tibble()
+    )
+  }) %>%
+  mutate(
+    participant_ID   = as.integer(participant_ID),
+    Timestamp        = suppressWarnings(as.numeric(Timestamp)),
+    `Accuracy IR`    = suppressWarnings(as.numeric(`Accuracy IR`)),
+    Reaction_time_IR = suppressWarnings(as.numeric(Reaction_time_IR)),
+    isRepeat         = coalesce(tolower(trimws(isRepeat))     == "true", FALSE),
+    isValidation     = coalesce(tolower(trimws(isValidation)) == "true", FALSE)
+  ) %>%
+  arrange(participant_ID, Timestamp)
+
+cat(sprintf("Total rows loaded: %s across %d participants.\n",
+            format(nrow(raw_all), big.mark = ","),
+            n_distinct(raw_all$participant_ID)))
+```
+
+```{r participant-validation}
+# Sort by time, remove practice rows, assign trial IDs
+raw_trials <- raw_all %>%
+  filter(!str_starts(Event, "Practice") | is.na(Event)) %>%
+  arrange(participant_ID, Timestamp) %>%
+  group_by(participant_ID) %>%
+  mutate(trial_id = cumsum(Event == "Sentence shown")) %>%
+  ungroup() %>%
+  filter(trial_id > 0)
+
+# One row per trial — from "Sentence shown" event
+sentence_meta <- raw_trials %>%
+  filter(Event == "Sentence shown") %>%
+  group_by(participant_ID, trial_id) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(participant_ID, trial_id, isRepeat, isValidation)
+
+# Check BOTH the isValidation column AND the Event string
+# (matches H1-H4 validation pipeline exactly)
+has_validation_flag <- raw_trials %>%
+  group_by(participant_ID, trial_id) %>%
+  summarise(
+    has_validation = any(str_detect(Event, "Validation"), na.rm = TRUE),
+    ir_pressed     = any(str_detect(Event, "IR pressed"), na.rm = TRUE),
+    .groups        = "drop"
+  )
+
+all_trials <- sentence_meta %>%
+  inner_join(has_validation_flag, by = c("participant_ID", "trial_id")) %>%
+  mutate(is_validation = isValidation | has_validation)
+
+val_trials <- all_trials %>% filter(is_validation == TRUE)
+cat(sprintf("Total validation trials found: %d\n", nrow(val_trials)))
+
+# Apply the formula: Correct Hits > (False Alarms / 2) + Missed
+validation_summary <- val_trials %>%
+  group_by(participant_ID) %>%
+  summarise(
+    Correct_Hits = sum(isRepeat == TRUE  & ir_pressed == TRUE,  na.rm = TRUE),
+    False_Alarms = sum(isRepeat == FALSE & ir_pressed == TRUE,  na.rm = TRUE),
+    Missed       = sum(isRepeat == TRUE  & ir_pressed == FALSE, na.rm = TRUE),
+    .groups      = "drop"
+  ) %>%
+  mutate(
+    Passes = Correct_Hits > (False_Alarms / 2) + Missed,
+    Status = ifelse(Passes, "Kept", "Excluded")
+  )
+
+valid_ids    <- validation_summary %>% filter( Passes) %>% pull(participant_ID)
+excluded_ids <- validation_summary %>% filter(!Passes) %>% pull(participant_ID)
+
+cat(sprintf("Total participants:    %d\n", nrow(validation_summary)))
+cat(sprintf("Participants KEPT:     %d\n", length(valid_ids)))
+cat(sprintf("Participants EXCLUDED: %d\n", length(excluded_ids)))
+if (length(excluded_ids) > 0)
+  cat(sprintf("Excluded IDs: %s\n", paste(excluded_ids, collapse = ", ")))
+```
+
+## Validation Results Table
+
+Green = kept, Red = excluded.
+
+```{r validation-table}
+validation_summary %>%
+  select(participant_ID, Correct_Hits, False_Alarms, Missed, Status) %>%
+  kable(
+    caption   = "Table 0. Participant Validation Results",
+    col.names = c("Participant", "Correct Hits", "Wrong Presses", "Missed", "Status"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position", "scale_down"),
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = FALSE, position = "center"
+  ) %>%
+  column_spec(5,
+    bold       = TRUE,
+    color      = ifelse(validation_summary$Passes, "#1B5E20", "#B71C1C"),
+    background = ifelse(validation_summary$Passes, "#E8F5E9", "#FDECEA")
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+
+write_csv(validation_summary, file.path(output_dir, "H6_validation.csv"))
+```
+
+---
+
+# Step A: Loading Fatigue Data
+
+```{r data-prep}
+fatigue_raw <- log_files %>%
+  map_dfr(~ {
+    tryCatch({
+      d <- read_csv(.x, show_col_types = FALSE, col_types = cols(.default = "c"))
+      d %>%
+        filter(!str_detect(Event, "Practice"), str_detect(Event, "IR pressed"))
+    }, error = function(e) tibble())
+  }) %>%
+  mutate(
+    participant_ID   = as.integer(participant_ID),
+    Timestamp        = suppressWarnings(as.numeric(Timestamp)),
+    Reaction_time_IR = suppressWarnings(as.numeric(Reaction_time_IR)),
+    `Accuracy IR`    = suppressWarnings(as.numeric(`Accuracy IR`))
+  ) %>%
+  filter(!is.na(Reaction_time_IR), participant_ID %in% valid_ids)
+
+cat(sprintf("IR press events (valid participants): %s\n",
+            format(nrow(fatigue_raw), big.mark = ",")))
+cat(sprintf("Valid participants in dataset:        %d\n",
+            n_distinct(fatigue_raw$participant_ID)))
+```
+
+## Splitting into 3 Time Blocks
+
+```{r block-segmentation}
+# Sort by Timestamp first — so row 1 = FIRST event in real time
+fatigue_blocks <- fatigue_raw %>%
+  arrange(participant_ID, Timestamp) %>%
+  group_by(participant_ID) %>%
+  mutate(
+    trial_sequence = row_number(),
+    total_trials   = n(),
+    block_id       = ntile(trial_sequence, 3)
+  ) %>%
+  mutate(
+    Block_Name = case_when(
+      block_id == 1 ~ "1: Early",
+      block_id == 2 ~ "2: Middle",
+      block_id == 3 ~ "3: Late"
+    )
+  ) %>%
+  ungroup()
+
+cat(sprintf("Split %s events into 3 blocks across %d participants.\n",
+            format(nrow(fatigue_blocks), big.mark = ","),
+            n_distinct(fatigue_blocks$participant_ID)))
+
+min_trials <- fatigue_blocks %>%
+  group_by(participant_ID) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n) %>% min()
+cat(sprintf("Minimum IR trials per participant: %d\n", min_trials))
+```
+
+## Preview Table 1 — Raw Rows with Block Assignment
+
+```{r preview-raw-rows}
+sample_ids <- fatigue_blocks %>%
+  distinct(participant_ID) %>% slice(1:3) %>% pull(participant_ID)
+
+fatigue_blocks %>%
+  filter(participant_ID %in% sample_ids) %>%
+  mutate(Timestamp_s = round(Timestamp / 1000, 1)) %>%
+  select(
+    Participant    = participant_ID,
+    `Trial #`      = trial_sequence,
+    `Total Trials` = total_trials,
+    `Block ID`     = block_id,
+    `Block Name`   = Block_Name,
+    `RT (ms)`      = Reaction_time_IR,
+    `Timestamp (s)` = Timestamp_s
+  ) %>%
+  kable(
+    caption  = "Preview Table 1. Sample rows — trial number, block, RT and Timestamp.",
+    booktabs = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position", "scale_down"),
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE, position = "center", font_size = 10
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+## Preview Table 2 — Block Boundaries Per Participant
+
+```{r preview-block-boundaries}
+block_boundaries <- fatigue_blocks %>%
+  group_by(participant_ID, Block_Name) %>%
+  summarise(
+    First_Trial       = min(trial_sequence),
+    Last_Trial        = max(trial_sequence),
+    N_Trials          = n(),
+    First_Timestamp_s = round(min(Timestamp, na.rm = TRUE) / 1000, 0),
+    Last_Timestamp_s  = round(max(Timestamp, na.rm = TRUE) / 1000, 0),
+    .groups           = "drop"
+  ) %>%
+  arrange(participant_ID, Block_Name)
+
+block_boundaries %>%
+  filter(participant_ID %in% sample_ids) %>%
+  kable(
+    caption   = "Preview Table 2. Block boundaries for 3 sample participants.",
+    col.names = c("Participant", "Block", "First Trial#", "Last Trial#",
+                  "N Trials", "Block Start (s)", "Block End (s)"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white") %>%
+  pack_rows("Participant 1", 1, 3) %>%
+  pack_rows("Participant 2", 4, 6) %>%
+  pack_rows("Participant 3", 7, 9)
+```
+
+## Preview Table 3 — Full Block Size Summary
+
+```{r preview-block-sizes}
+block_sizes <- fatigue_blocks %>%
+  group_by(participant_ID, Block_Name) %>%
+  summarise(N_Trials = n(), .groups = "drop") %>%
+  pivot_wider(names_from = Block_Name, values_from = N_Trials) %>%
+  mutate(
+    Total    = `1: Early` + `2: Middle` + `3: Late`,
+    Max_N    = pmax(`1: Early`, `2: Middle`, `3: Late`),
+    Min_N    = pmin(`1: Early`, `2: Middle`, `3: Late`),
+    Balanced = ifelse(Max_N - Min_N <= 1, "Yes", "No")
+  ) %>%
+  select(-Max_N, -Min_N)
+
+block_sizes %>%
+  kable(
+    caption   = "Preview Table 3. Trials per block per participant.",
+    col.names = c("Participant", "Early", "Middle", "Late", "Total", "Balanced?"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position", "scale_down"),
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE, position = "center", font_size = 10
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white") %>%
+  column_spec(6,
+    bold       = TRUE,
+    color      = ifelse(block_sizes$Balanced == "Yes", "#1B5E20", "#B71C1C"),
+    background = ifelse(block_sizes$Balanced == "Yes", "#E8F5E9", "#FDECEA")
+  )
+
+cat(sprintf("\nAll participants balanced: %s\n",
+            ifelse(all(block_sizes$Balanced == "Yes"), "YES", "NO — check data!")))
+```
+
+## Computing One Score Per Person Per Block
+
+We use **median RT** (not mean) because it is less affected by the occasional
+very slow response. We use **mean accuracy** within each block.
+
+```{r compute-block-scores}
+person_blocks <- fatigue_blocks %>%
+  group_by(participant_ID, Block_Name) %>%
+  summarise(
+    Median_RT = median(Reaction_time_IR, na.rm = TRUE),
+    Mean_Acc  = mean(`Accuracy IR`, na.rm = TRUE),
+    n_trials  = n(),
+    .groups   = "drop"
+  ) %>%
+  mutate(Block_Name = factor(Block_Name,
+                             levels = c("1: Early", "2: Middle", "3: Late")))
+
+write_csv(person_blocks, file.path(output_dir, "H6_block_scores.csv"))
+cat(sprintf("Block scores: %d rows (%d participants x 3 blocks)\n",
+            nrow(person_blocks), n_distinct(person_blocks$participant_ID)))
+```
+
+---
+
+# Step B: Descriptive Statistics
+
+## Table 1 — Reaction Time by Block
+
+```{r rt-descriptives}
+rt_desc <- person_blocks %>%
+  group_by(Block_Name) %>%
+  summarise(
+    N         = n(),
+    Mean_RT   = round(mean(Median_RT,   na.rm = TRUE), 1),
+    Median_RT = round(median(Median_RT, na.rm = TRUE), 1),
+    SD_RT     = round(sd(Median_RT,     na.rm = TRUE), 1),
+    Min_RT    = round(min(Median_RT,    na.rm = TRUE), 1),
+    Max_RT    = round(max(Median_RT,    na.rm = TRUE), 1),
+    .groups   = "drop"
+  )
+
+rt_desc %>%
+  kable(
+    caption   = "Table 1. Reaction Time (ms) by Time Block",
+    col.names = c("Block", "N", "Mean (ms)", "Median (ms)", "SD", "Min", "Max"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+## Table 2 — Accuracy by Block
+
+```{r acc-descriptives}
+acc_desc <- person_blocks %>%
+  group_by(Block_Name) %>%
+  summarise(
+    N        = n(),
+    Mean_Acc = round(mean(Mean_Acc,   na.rm = TRUE), 4),
+    SD_Acc   = round(sd(Mean_Acc,     na.rm = TRUE), 4),
+    Min_Acc  = round(min(Mean_Acc,    na.rm = TRUE), 4),
+    Max_Acc  = round(max(Mean_Acc,    na.rm = TRUE), 4),
+    .groups  = "drop"
+  )
+
+acc_desc %>%
+  kable(
+    caption   = "Table 2. Accuracy (proportion correct) by Time Block",
+    col.names = c("Block", "N", "Mean Accuracy", "SD", "Min", "Max"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+```
+
+---
+
+# Step C: Visualising the Data
+
+## Figure 1 — Reaction Time Distributions
+
+```{r fig1-rt-violin, fig.cap="Figure 1. Reaction time violin + boxplot per block. Each dot = one participant. Y-axis starts at 0. If people get slower, boxes shift upward from Early to Late.", fig.width=7, fig.height=5, out.width="100%"}
+p1 <- ggplot(person_blocks,
+  aes(x = Block_Name, y = Median_RT, fill = Block_Name)) +
+  geom_violin(alpha = 0.55, colour = "grey60", width = 0.8) +
+  geom_boxplot(width = 0.18, alpha = 0.85, outlier.shape = NA, colour = "grey20") +
+  geom_jitter(width = 0.07, alpha = 0.35, size = 1.5, colour = "grey30") +
+  scale_fill_manual(values = PAL_BLOCKS, guide = "none") +
+  scale_y_continuous(limits = c(0, 3200), oob = scales::squish,
+                     labels = comma_format()) +
+  labs(
+    title    = "Figure 1: Reaction Time by Time Block",
+    subtitle = "Y-axis starts at 0. If people get slower, boxes shift up.",
+    x        = "Time Block",
+    y        = "Median Reaction Time per Participant (ms)"
+  )
+
+p1
+ggsave(file.path(output_dir, "H6_RT_violin.png"), p1, width = 7, height = 5, dpi = 150)
+```
+
+## Figure 2 — Accuracy Distributions
+
+```{r fig2-acc-violin, fig.cap="Figure 2. Accuracy violin + boxplot per block. Each dot = one participant. If people make more mistakes later, boxes shift downward from Early to Late.", fig.width=7, fig.height=5, out.width="100%"}
+p2 <- ggplot(person_blocks,
+  aes(x = Block_Name, y = Mean_Acc, fill = Block_Name)) +
+  geom_violin(alpha = 0.55, colour = "grey60", width = 0.8) +
+  geom_boxplot(width = 0.18, alpha = 0.85, outlier.shape = NA, colour = "grey20") +
+  geom_jitter(width = 0.07, alpha = 0.35, size = 1.5, colour = "grey30") +
+  scale_fill_manual(values = PAL_BLOCKS, guide = "none") +
+  scale_y_continuous(limits = c(0, 1), labels = percent_format()) +
+  labs(
+    title    = "Figure 2: Accuracy by Time Block",
+    subtitle = "Does accuracy drop from Early to Late?",
+    x        = "Time Block",
+    y        = "Mean Accuracy per Participant"
+  )
+
+p2
+ggsave(file.path(output_dir, "H6_Acc_violin.png"), p2, width = 7, height = 5, dpi = 150)
+```
+
+## Figure 3 — Density Plots (Shape of the Data)
+
+Density plots show WHERE most participants' scores cluster. A curve shifted
+to the right (for RT) means more participants were slow in that block.
+
+```{r fig3-density, fig.cap="Figure 3. Density curves for RT (top) and Accuracy (bottom) per block. The peak shows where most participants scored. A rightward shift in RT = slower responses.", fig.width=7, fig.height=7, out.width="100%"}
+p3a <- ggplot(person_blocks,
+  aes(x = Median_RT, fill = Block_Name, colour = Block_Name)) +
+  geom_density(alpha = 0.3, linewidth = 1) +
+  scale_fill_manual(values   = PAL_BLOCKS, name = "Block") +
+  scale_colour_manual(values = PAL_BLOCKS, name = "Block") +
+  scale_x_continuous(limits = c(0, NA), labels = comma_format()) +
+  labs(
+    title    = "Fig 3a: RT Density by Block",
+    subtitle = "Right shift = slower. Overlap = similar performance.",
+    x        = "Median RT (ms)", y        = "Density"
+  )
+
+p3b <- ggplot(person_blocks,
+  aes(x = Mean_Acc, fill = Block_Name, colour = Block_Name)) +
+  geom_density(alpha = 0.3, linewidth = 1) +
+  scale_fill_manual(values   = PAL_BLOCKS, name = "Block") +
+  scale_colour_manual(values = PAL_BLOCKS, name = "Block") +
+  scale_x_continuous(limits = c(0, 1), labels = percent_format()) +
+  labs(
+    title    = "Fig 3b: Accuracy Density by Block",
+    subtitle = "Left shift = lower accuracy. Overlap = similar performance.",
+    x        = "Mean Accuracy", y = "Density"
+  )
+
+p3a / p3b
+ggsave(file.path(output_dir, "H6_density.png"),
+       p3a / p3b, width = 7, height = 7, dpi = 150)
+```
+
+## Figure 4 — Average Trend Line
+
+This plot shows the **group average** at each block with error bars.
+A clear upward slope for RT or downward slope for accuracy = fatigue.
+
+```{r fig4-trend, fig.cap="Figure 4. Average RT (top) and Accuracy (bottom) at each block. Error bars = +/- 1 standard error. A clear slope = performance changed across the experiment.", fig.width=7, fig.height=7, out.width="100%"}
+trend_rt <- person_blocks %>%
+  group_by(Block_Name) %>%
+  summarise(Mean = mean(Median_RT, na.rm = TRUE),
+            SE   = sd(Median_RT,   na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+trend_acc <- person_blocks %>%
+  group_by(Block_Name) %>%
+  summarise(Mean = mean(Mean_Acc, na.rm = TRUE),
+            SE   = sd(Mean_Acc,   na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+p4a <- ggplot(trend_rt, aes(x = Block_Name, y = Mean, group = 1)) +
+  geom_ribbon(aes(ymin = Mean - SE, ymax = Mean + SE), alpha = 0.15,
+              fill = PAL_BLOCKS["1: Early"]) +
+  geom_line(colour = PAL_BLOCKS["1: Early"], linewidth = 1.2) +
+  geom_point(aes(colour = Block_Name), size = 4) +
+  geom_errorbar(aes(ymin = Mean - SE, ymax = Mean + SE),
+                width = 0.15, colour = "grey40", linewidth = 0.8) +
+  scale_colour_manual(values = PAL_BLOCKS, guide = "none") +
+  scale_y_continuous(limits = c(0, NA), labels = comma_format()) +
+  labs(title    = "Fig 4a: Average RT Trend Across Blocks",
+       subtitle = "Y starts at 0. Each point = group mean. Shaded band = standard error.",
+       x = "Time Block", y = "Mean Median RT (ms)")
+
+p4b <- ggplot(trend_acc, aes(x = Block_Name, y = Mean, group = 1)) +
+  geom_ribbon(aes(ymin = Mean - SE, ymax = Mean + SE), alpha = 0.15,
+              fill = PAL_BLOCKS["1: Early"]) +
+  geom_line(colour = PAL_BLOCKS["1: Early"], linewidth = 1.2) +
+  geom_point(aes(colour = Block_Name), size = 4) +
+  geom_errorbar(aes(ymin = Mean - SE, ymax = Mean + SE),
+                width = 0.15, colour = "grey40", linewidth = 0.8) +
+  scale_colour_manual(values = PAL_BLOCKS, guide = "none") +
+  scale_y_continuous(limits = c(0, 1), labels = percent_format()) +
+  labs(title    = "Fig 4b: Average Accuracy Trend Across Blocks",
+       subtitle = "Each point = group mean. Shaded band = standard error.",
+       x = "Time Block", y = "Mean Accuracy")
+
+p4a / p4b
+ggsave(file.path(output_dir, "H6_trend_lines.png"),
+       p4a / p4b, width = 7, height = 7, dpi = 150)
+```
+
+## Figure 5 — Individual Participant Trajectories (Spaghetti)
+
+Each thin line = one participant. If **most** lines go up for RT or down for
+accuracy, fatigue is widespread — not just a few outliers.
+
+```{r fig5-spaghetti, fig.cap="Figure 5. Spaghetti plots. Each thin line = one participant. Thick red line = group average. Top = RT, Bottom = Accuracy.", fig.width=7, fig.height=7, out.width="100%"}
+p5a <- ggplot(person_blocks,
+  aes(x = Block_Name, y = Median_RT, group = participant_ID)) +
+  geom_line(alpha = 0.25, colour = "#2E86AB", linewidth = 0.5) +
+  stat_summary(aes(group = 1), fun = mean, geom = "line",
+               colour = "#C73E1D", linewidth = 1.5) +
+  stat_summary(aes(group = 1), fun = mean, geom = "point",
+               colour = "#C73E1D", size = 3) +
+  scale_y_continuous(limits = c(0, NA), labels = comma_format()) +
+  labs(title    = "Fig 5a: Individual RT Trajectories",
+       subtitle = "Y starts at 0. Thin = each person. Thick red = group average.",
+       x = "Time Block", y = "Median RT (ms)")
+
+p5b <- ggplot(person_blocks,
+  aes(x = Block_Name, y = Mean_Acc, group = participant_ID)) +
+  geom_line(alpha = 0.25, colour = "#F18F01", linewidth = 0.5) +
+  stat_summary(aes(group = 1), fun = mean, geom = "line",
+               colour = "#C73E1D", linewidth = 1.5) +
+  stat_summary(aes(group = 1), fun = mean, geom = "point",
+               colour = "#C73E1D", size = 3) +
+  scale_y_continuous(limits = c(0, 1), labels = percent_format()) +
+  labs(title    = "Fig 5b: Individual Accuracy Trajectories",
+       subtitle = "Thin = each person. Thick red = group average.",
+       x = "Time Block", y = "Mean Accuracy")
+
+p5a / p5b
+ggsave(file.path(output_dir, "H6_spaghetti.png"),
+       p5a / p5b, width = 7, height = 7, dpi = 150)
+```
+
+## Figure 6 — Summary Boxplots
+
+```{r fig6-summary-box, fig.cap="Figure 6. Clean summary boxplots. Red dot = group mean. Box = spread of individual medians. This is the clearest single visual for whether fatigue is present.", fig.width=7, fig.height=7, out.width="100%"}
+p6a <- ggplot(person_blocks,
+  aes(x = Block_Name, y = Median_RT, fill = Block_Name)) +
+  geom_boxplot(width = 0.45, alpha = 0.75, outlier.alpha = 0.3) +
+  stat_summary(fun = mean, geom = "point",
+               shape = 21, size = 3, fill = "#C73E1D", colour = "white") +
+  scale_fill_manual(values = PAL_BLOCKS, guide = "none") +
+  scale_y_continuous(limits = c(0, NA), labels = comma_format()) +
+  labs(title = "Fig 6a: RT by Block (Y from 0 | red dot = mean)",
+       x = "Time Block", y = "Median RT (ms)")
+
+p6b <- ggplot(person_blocks,
+  aes(x = Block_Name, y = Mean_Acc, fill = Block_Name)) +
+  geom_boxplot(width = 0.45, alpha = 0.75, outlier.alpha = 0.3) +
+  stat_summary(fun = mean, geom = "point",
+               shape = 21, size = 3, fill = "#C73E1D", colour = "white") +
+  scale_fill_manual(values = PAL_BLOCKS, guide = "none") +
+  scale_y_continuous(limits = c(0, 1), labels = percent_format()) +
+  labs(title = "Fig 6b: Accuracy by Block (red dot = mean)",
+       x = "Time Block", y = "Mean Accuracy")
+
+p6a / p6b
+ggsave(file.path(output_dir, "H6_summary_boxplots.png"),
+       p6a / p6b, width = 7, height = 7, dpi = 150)
+```
+
+---
+
+# Step D: Normality Check
+
+Before picking the statistical test, we check if each block's data is normally
+distributed. We use:
+
+- **Shapiro-Wilk test** — gives a number (p < 0.05 = NOT normal)
+- **Q-Q plot** — visual: dots on the line = normal, curving away = NOT normal
+
+## Table 3 — Shapiro-Wilk Results
+
+```{r normality-check}
+blocks <- c("1: Early", "2: Middle", "3: Late")
+
+sw_rt <- lapply(blocks, function(b) {
+  vals   <- person_blocks %>% filter(Block_Name == b) %>% pull(Median_RT)
+  result <- shapiro.test(vals)
+  tibble(Outcome = "Reaction Time", Block = b,
+         W       = round(as.numeric(result$statistic), 4),
+         p_value = round(as.numeric(result$p.value),   4),
+         Normal  = ifelse(result$p.value > 0.05,
+                          "Yes (p > 0.05)", "No (p <= 0.05)"))
+}) %>% bind_rows()
+
+sw_acc <- lapply(blocks, function(b) {
+  vals   <- person_blocks %>% filter(Block_Name == b) %>% pull(Mean_Acc)
+  result <- shapiro.test(vals)
+  tibble(Outcome = "Accuracy", Block = b,
+         W       = round(as.numeric(result$statistic), 4),
+         p_value = round(as.numeric(result$p.value),   4),
+         Normal  = ifelse(result$p.value > 0.05,
+                          "Yes (p > 0.05)", "No (p <= 0.05)"))
+}) %>% bind_rows()
+
+sw_all <- bind_rows(sw_rt, sw_acc)
+
+sw_all %>%
+  kable(
+    caption   = "Table 3. Shapiro-Wilk Normality Test (per block, per outcome)",
+    col.names = c("Outcome", "Block", "W statistic", "p-value", "Normal?"),
+    booktabs  = TRUE
+  ) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  column_spec(5,
+    bold       = TRUE,
+    color      = ifelse(sw_all$Normal == "Yes (p > 0.05)", "#1B5E20", "#B71C1C"),
+    background = ifelse(sw_all$Normal == "Yes (p > 0.05)", "#E8F5E9", "#FDECEA")
+  ) %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+
+rt_normal_all  <- all(sw_rt$p_value  > 0.05)
+acc_normal_all <- all(sw_acc$p_value > 0.05)
+```
+
+## Figure 7 — Q-Q Plots
+
+```{r fig7-qq, fig.cap="Figure 7. Q-Q plots for all six distributions (RT and Accuracy per block). Points on the diagonal = normal. Curves away = NOT normal.", fig.width=7, fig.height=9, out.width="100%"}
+qq_rt <- lapply(blocks, function(b) {
+  d   <- person_blocks %>% filter(Block_Name == b)
+  lbl <- sw_rt$Normal[sw_rt$Block == b]
+  ggplot(d, aes(sample = Median_RT)) +
+    stat_qq(colour = PAL_BLOCKS[b], alpha = 0.7, size = 2) +
+    stat_qq_line(colour = "#C73E1D", linewidth = 1) +
+    labs(title    = paste("RT Q-Q:", b),
+         subtitle = lbl,
+         x = "Expected", y = "Actual RT (ms)")
+})
+
+qq_acc <- lapply(blocks, function(b) {
+  d   <- person_blocks %>% filter(Block_Name == b)
+  lbl <- sw_acc$Normal[sw_acc$Block == b]
+  ggplot(d, aes(sample = Mean_Acc)) +
+    stat_qq(colour = PAL_BLOCKS[b], alpha = 0.7, size = 2) +
+    stat_qq_line(colour = "#C73E1D", linewidth = 1) +
+    labs(title    = paste("Acc Q-Q:", b),
+         subtitle = lbl,
+         x = "Expected", y = "Actual Accuracy")
+})
+
+(qq_rt[[1]]  | qq_rt[[2]]  | qq_rt[[3]]) /
+(qq_acc[[1]] | qq_acc[[2]] | qq_acc[[3]])
+ggsave(file.path(output_dir, "H6_qq_all.png"),
+       (qq_rt[[1]]  | qq_rt[[2]]  | qq_rt[[3]]) /
+       (qq_acc[[1]] | qq_acc[[2]] | qq_acc[[3]]),
+       width = 7, height = 7, dpi = 150)
+```
+
+## Test Selection Decision
+
+```{r test-decision, echo=FALSE, results='asis'}
+cat("| Outcome | All blocks normal? | Test chosen |\n")
+cat("|---|---|---|\n")
+cat(sprintf("| Reaction Time | %s | %s |\n",
+    ifelse(rt_normal_all,  "Yes — all pass", "No — at least one fails"),
+    ifelse(rt_normal_all,  "Repeated Measures ANOVA", "Friedman Test")))
+cat(sprintf("| Accuracy | %s | %s |\n",
+    ifelse(acc_normal_all, "Yes — all pass", "No — at least one fails"),
+    ifelse(acc_normal_all, "Repeated Measures ANOVA", "Friedman Test")))
+```
+
+---
+
+# Step E: Statistical Tests
+
+## Test 1 — Reaction Time
+
+```{r test-rt}
+if (rt_normal_all) {
+  cat("All RT blocks normal → Repeated Measures ANOVA\n\n")
+  rm_rt        <- summary(aov(Median_RT ~ Block_Name +
+                              Error(participant_ID / Block_Name), data = person_blocks))
+  print(rm_rt)
+  p_rt         <- rm_rt[["Error: participant_ID:Block_Name"]][[1]][["Pr(>F)"]][1]
+  test_name_rt <- "Repeated Measures ANOVA"
+  chi_rt       <- NA_real_;  df_rt <- NA_real_
+  cat(sprintf("\nRM-ANOVA p-value for RT: %.4f\n", p_rt))
+} else {
+  cat("At least one RT block non-normal → Friedman Test\n\n")
+  friedman_rt  <- friedman.test(Median_RT ~ Block_Name | participant_ID,
+                                data = person_blocks)
+  chi_rt       <- as.numeric(friedman_rt$statistic)
+  df_rt        <- as.numeric(friedman_rt$parameter)
+  p_rt         <- as.numeric(friedman_rt$p.value)
+  test_name_rt <- "Friedman Rank Sum Test"
+
+  tibble(Outcome = "Reaction Time", Test = test_name_rt,
+         Chi_sq  = round(chi_rt, 3), df = df_rt,
+         p_value = round(p_rt,   4),
+         Sig     = ifelse(p_rt < 0.05, "Yes (p < 0.05)", "No (p >= 0.05)")) %>%
+    kable(caption   = "Table 4. Test Result — Reaction Time",
+          col.names = c("Outcome","Test","Chi-sq","df","p-value","Significant?"),
+          booktabs  = TRUE) %>%
+    kable_styling(latex_options     = c("striped","HOLD_position"),
+                  bootstrap_options = c("striped","hover"),
+                  full_width = FALSE, position = "center") %>%
+    row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+}
+
+cat(sprintf("\nDECISION (RT): %s (p = %.4f)\n",
+    ifelse(p_rt < 0.05, "REJECT H0 — RT changed significantly across blocks",
+                        "KEEP H0 — RT did NOT change significantly"),
+    p_rt))
+```
+
+## Test 2 — Accuracy
+
+```{r test-acc}
+if (acc_normal_all) {
+  cat("All Accuracy blocks normal → Repeated Measures ANOVA\n\n")
+  rm_acc        <- summary(aov(Mean_Acc ~ Block_Name +
+                               Error(participant_ID / Block_Name), data = person_blocks))
+  print(rm_acc)
+  p_acc         <- rm_acc[["Error: participant_ID:Block_Name"]][[1]][["Pr(>F)"]][1]
+  test_name_acc <- "Repeated Measures ANOVA"
+  chi_acc       <- NA_real_;  df_acc <- NA_real_
+  cat(sprintf("\nRM-ANOVA p-value for Accuracy: %.4f\n", p_acc))
+} else {
+  cat("At least one Accuracy block non-normal → Friedman Test\n\n")
+  friedman_acc  <- friedman.test(Mean_Acc ~ Block_Name | participant_ID,
+                                 data = person_blocks)
+  chi_acc       <- as.numeric(friedman_acc$statistic)
+  df_acc        <- as.numeric(friedman_acc$parameter)
+  p_acc         <- as.numeric(friedman_acc$p.value)
+  test_name_acc <- "Friedman Rank Sum Test"
+
+  tibble(Outcome = "Accuracy", Test = test_name_acc,
+         Chi_sq  = round(chi_acc, 3), df = df_acc,
+         p_value = round(p_acc,   4),
+         Sig     = ifelse(p_acc < 0.05, "Yes (p < 0.05)", "No (p >= 0.05)")) %>%
+    kable(caption   = "Table 5. Test Result — Accuracy",
+          col.names = c("Outcome","Test","Chi-sq","df","p-value","Significant?"),
+          booktabs  = TRUE) %>%
+    kable_styling(latex_options     = c("striped","HOLD_position"),
+                  bootstrap_options = c("striped","hover"),
+                  full_width = FALSE, position = "center") %>%
+    row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+}
+
+cat(sprintf("\nDECISION (Accuracy): %s (p = %.4f)\n",
+    ifelse(p_acc < 0.05, "REJECT H0 — Accuracy changed significantly across blocks",
+                         "KEEP H0 — Accuracy did NOT change significantly"),
+    p_acc))
+```
+
+## Post-Hoc Tests (only if main test is significant)
+
+```{r post-hoc-rt}
+cat("=== Post-Hoc: Reaction Time ===\n\n")
+if (p_rt < 0.05) {
+  pairs <- list(c("1: Early","2: Middle"), c("2: Middle","3: Late"),
+                c("1: Early","3: Late"))
+  ph_rt <- lapply(pairs, function(pair) {
+    common <- intersect(
+      person_blocks %>% filter(Block_Name == pair[1]) %>% pull(participant_ID),
+      person_blocks %>% filter(Block_Name == pair[2]) %>% pull(participant_ID))
+    d1 <- person_blocks %>% filter(Block_Name == pair[1], participant_ID %in% common) %>%
+          arrange(participant_ID) %>% pull(Median_RT)
+    d2 <- person_blocks %>% filter(Block_Name == pair[2], participant_ID %in% common) %>%
+          arrange(participant_ID) %>% pull(Median_RT)
+    w  <- wilcox.test(d1, d2, paired = TRUE, exact = FALSE)
+    tibble(Comparison = paste(pair[1], "vs", pair[2]),
+           W          = round(as.numeric(w$statistic), 1),
+           p_raw      = round(as.numeric(w$p.value),   4))
+  }) %>% bind_rows() %>%
+    mutate(p_adj = round(p.adjust(p_raw, "bonferroni"), 4),
+           Sig   = ifelse(p_adj < 0.05, "Yes", "No"))
+
+  ph_rt %>%
+    kable(caption   = "Table 6. Post-Hoc Pairwise Tests — Reaction Time (Bonferroni)",
+          col.names = c("Comparison","W","Raw p","Adj. p","Significant?"),
+          booktabs  = TRUE) %>%
+    kable_styling(latex_options     = c("striped","HOLD_position"),
+                  bootstrap_options = c("striped","hover"),
+                  full_width = FALSE, position = "center") %>%
+    row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+} else {
+  cat("RT test not significant — no post-hoc tests needed.\n")
+}
+```
+
+```{r post-hoc-acc}
+cat("=== Post-Hoc: Accuracy ===\n\n")
+if (p_acc < 0.05) {
+  pairs <- list(c("1: Early","2: Middle"), c("2: Middle","3: Late"),
+                c("1: Early","3: Late"))
+  ph_acc <- lapply(pairs, function(pair) {
+    common <- intersect(
+      person_blocks %>% filter(Block_Name == pair[1]) %>% pull(participant_ID),
+      person_blocks %>% filter(Block_Name == pair[2]) %>% pull(participant_ID))
+    d1 <- person_blocks %>% filter(Block_Name == pair[1], participant_ID %in% common) %>%
+          arrange(participant_ID) %>% pull(Mean_Acc)
+    d2 <- person_blocks %>% filter(Block_Name == pair[2], participant_ID %in% common) %>%
+          arrange(participant_ID) %>% pull(Mean_Acc)
+    w  <- wilcox.test(d1, d2, paired = TRUE, exact = FALSE)
+    tibble(Comparison = paste(pair[1], "vs", pair[2]),
+           W          = round(as.numeric(w$statistic), 1),
+           p_raw      = round(as.numeric(w$p.value),   4))
+  }) %>% bind_rows() %>%
+    mutate(p_adj = round(p.adjust(p_raw, "bonferroni"), 4),
+           Sig   = ifelse(p_adj < 0.05, "Yes", "No"))
+
+  ph_acc %>%
+    kable(caption   = "Table 7. Post-Hoc Pairwise Tests — Accuracy (Bonferroni)",
+          col.names = c("Comparison","W","Raw p","Adj. p","Significant?"),
+          booktabs  = TRUE) %>%
+    kable_styling(latex_options     = c("striped","HOLD_position"),
+                  bootstrap_options = c("striped","hover"),
+                  full_width = FALSE, position = "center") %>%
+    row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white")
+} else {
+  cat("Accuracy test not significant — no post-hoc tests needed.\n")
+}
+```
+
+---
+
+# Final Conclusion
+
+```{r conclusion, echo=FALSE, results='asis'}
+rt_sig     <- p_rt  < 0.05
+acc_sig    <- p_acc < 0.05
+either_sig <- rt_sig | acc_sig
+
+cat("## Was H6 Supported?\n\n")
+
+cat("### Reaction Time:\n")
+if (rt_sig) {
+  cat(sprintf("- **REJECTED H0** (p = %.4f) — RT changed significantly across blocks.\n\n", p_rt))
+} else {
+  cat(sprintf("- **KEPT H0** (p = %.4f) — RT was stable across blocks.\n\n", p_rt))
+}
+
+cat("### Accuracy:\n")
+if (acc_sig) {
+  cat(sprintf("- **REJECTED H0** (p = %.4f) — Accuracy changed significantly across blocks.\n\n", p_acc))
+} else {
+  cat(sprintf("- **KEPT H0** (p = %.4f) — Accuracy was stable across blocks.\n\n", p_acc))
+}
+
+cat("### Overall Conclusion:\n\n")
+if (either_sig) {
+  cat(paste0(
+    "**H6 is SUPPORTED.** There is evidence of performance change across the ",
+    "experiment. This suggests cognitive fatigue played a role. Future studies ",
+    "should model trial order as a within-subject factor and consider giving ",
+    "participants scheduled breaks during long experiments.\n"
+  ))
+} else {
+  cat(paste0(
+    "**H6 is NOT supported.** Participants maintained consistent performance ",
+    "across all three time blocks. This is a **positive finding** — it means the ",
+    "experimental design was robust. The effects found in H1–H4 are unlikely to ",
+    "be contaminated by fatigue, since performance did not degrade over time.\n"
+  ))
+}
+```
+
+---
+
+# Data Flow and Working Summary
+
+```
+RAW LOG FILES (one per participant)
+        |
+        | Load ALL rows → isValidation check (column + Event string)
+        | Apply formula: Correct Hits > (False Alarms / 2) + Missed
+        v
+VALID PARTICIPANTS (expected: 112)
+        |
+        | Keep only IR press events (exclude Practice)
+        | Sort each participant's presses by Timestamp (chronological)
+        v
+FOR EACH PARTICIPANT:
+        trial_sequence = 1, 2, 3 ... N  (in time order)
+        ntile(sequence, 3) → 3 equal blocks:
+            Block 1: Early  = first  1/3 of presses
+            Block 2: Middle = second 1/3 of presses
+            Block 3: Late   = final  1/3 of presses
+        |
+        | Compute per person per block:
+        |   Median RT   = robust centre of RT distribution
+        |   Mean Acc    = proportion of correct presses
+        v
+BLOCK SCORE TABLE (112 × 3 = 336 rows)
+        |
+        | Step D: Shapiro-Wilk per block + Q-Q plots (6 tests)
+        |   If any block fails normality → Friedman Test
+        |   If all pass               → Repeated Measures ANOVA
+        v
+MAIN TEST (Friedman or RM-ANOVA)
+        p < 0.05 → significant change detected
+        p >= 0.05 → no change detected
+        |
+        | If significant:
+        |   Pairwise Wilcoxon tests (3 pairs)
+        |   Bonferroni correction (multiply p by 3)
+        v
+FINAL DECISION
+        H6 supported   → fatigue effect exists
+        H6 unsupported → experiment design is robust
+```
+
+## H6 Quick Reference Table
+
+```{r h6-summary-table, echo=FALSE}
+# Build safe labels — handles both Friedman and RM-ANOVA results
+rt_label <- if (!is.na(chi_rt)) {
+  paste0(test_name_rt, ": Chi-sq(", df_rt, ") = ", round(chi_rt, 3),
+         ", p = ", round(p_rt, 4))
+} else {
+  paste0(test_name_rt, ": p = ", round(p_rt, 4))
+}
+
+acc_label <- if (!is.na(chi_acc)) {
+  paste0(test_name_acc, ": Chi-sq(", df_acc, ") = ", round(chi_acc, 3),
+         ", p = ", round(p_acc, 4))
+} else {
+  paste0(test_name_acc, ": p = ", round(p_acc, 4))
+}
+
+tibble(
+  Item   = c("What we tested", "Data used", "How we split",
+             "Normality check", "Test for RT", "Test for Accuracy",
+             "RT result", "Accuracy result",
+             "Post-hoc correction", "Overall decision"),
+  Detail = c(
+    "Do RT and accuracy change across Early, Middle, Late blocks?",
+    "IR press events for all valid participants (practice removed)",
+    "Each person's presses sorted by Timestamp, split by ntile(n, 3)",
+    "Shapiro-Wilk per block + Q-Q plots (6 tests total)",
+    rt_label,
+    acc_label,
+    ifelse(rt_sig,
+           paste0("Significant (p = ", round(p_rt,  4), ") — RT changed"),
+           paste0("Not significant (p = ", round(p_rt,  4), ") — RT stable")),
+    ifelse(acc_sig,
+           paste0("Significant (p = ", round(p_acc, 4), ") — Accuracy changed"),
+           paste0("Not significant (p = ", round(p_acc, 4), ") — Accuracy stable")),
+    "Bonferroni correction on 3 pairwise tests (p x 3)",
+    ifelse(either_sig,
+           "H6 SUPPORTED — fatigue effect detected",
+           "H6 NOT SUPPORTED — performance stable, robust design")
+  )
+) %>%
+  kable(caption   = "Table 8. H6 Complete Summary",
+        col.names = c("What We Checked", "Result"),
+        booktabs  = TRUE) %>%
+  kable_styling(
+    latex_options     = c("striped", "HOLD_position"),
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE, position = "center"
+  ) %>%
+  column_spec(1, bold = TRUE, width = "5cm") %>%
+  column_spec(2, width = "10cm") %>%
+  row_spec(0, bold = TRUE, background = HDR_COLOR, color = "white") %>%
+  row_spec(10, bold = TRUE, background = "#EBF5FB")
+```
+
+---
+
+*Report generated on `r Sys.time()` using R `r R.version.string`*
